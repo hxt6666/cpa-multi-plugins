@@ -212,3 +212,62 @@ func samePersistedModels(a, b []pluginapi.ModelInfo) bool {
 	}
 	return bytes.Equal(aj, bj)
 }
+
+// preservePluginDocKeys re-injects whitelisted plugin-stamped keys that the
+// incoming document is missing but the current physical file carries (called
+// from the hostAuthSaveJSON funnel). The typed buildAuthFileJSON rebuilds —
+// lifecycle notes, adopt, import — construct a fresh document from a struct
+// and otherwise silently drop the v0.9.38 model_cache snapshot: every
+// credits-note churn wiped it, and the next discovery outage then advertised
+// nothing until the next successful discovery. Keys the caller explicitly
+// set always win over the persisted copy.
+func preservePluginDocKeys(name string, doc []byte) []byte {
+	if len(doc) == 0 || name == "" {
+		return doc
+	}
+	var have map[string]json.RawMessage
+	if err := json.Unmarshal(doc, &have); err != nil {
+		return doc
+	}
+	if _, ok := have[modelCacheDocKey]; ok {
+		return doc
+	}
+	physical := physicalDocByName(name)
+	if len(physical) == 0 {
+		return doc
+	}
+	var prev map[string]json.RawMessage
+	if err := json.Unmarshal(physical, &prev); err != nil {
+		return doc
+	}
+	raw, ok := prev[modelCacheDocKey]
+	if !ok || len(raw) == 0 {
+		return doc
+	}
+	have[modelCacheDocKey] = raw
+	merged, err := json.Marshal(have)
+	if err != nil {
+		return doc
+	}
+	return merged
+}
+
+// physicalDocByName resolves one credential document by exact file name
+// (best-effort; empty when the name is unknown — e.g. a first save).
+func physicalDocByName(name string) []byte {
+	files, err := hostAuthListFn()
+	if err != nil {
+		return nil
+	}
+	for _, f := range files {
+		if !strings.EqualFold(strings.TrimSpace(f.Name), name) {
+			continue
+		}
+		phys, err := hostAuthGetPhysicalFn(f.AuthIndex)
+		if err != nil || phys == nil {
+			return nil
+		}
+		return phys.JSON
+	}
+	return nil
+}

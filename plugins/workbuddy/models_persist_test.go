@@ -238,3 +238,42 @@ var capturedSaves []string
 // saveCalls returns the captured hostAuthSaveJSONFn payloads from the most
 // recent stubPersistSeams install.
 func saveCalls() []string { return capturedSaves }
+
+// TestPreservePluginDocKeysRestoresModelCache pins the v0.9.41 save-funnel
+// guard: a typed buildAuthFileJSON rebuild (the lifecycle/notes path)
+// produces a document WITHOUT model_cache; the funnel must re-inject the
+// persisted snapshot from the physical file, and a caller-supplied key must
+// win. Before this fix every credits-note churn wiped the v0.9.38 snapshot.
+func TestPreservePluginDocKeysRestoresModelCache(t *testing.T) {
+	snap := &persistedModelCache{Realm: "cn", FetchedAt: "2026-09-27T00:00:00Z", Models: realmTestModels("m-keep")}
+	physDoc, err := mergeModelCacheIntoDoc(persistTestStorage("tok-live", "cn", ""), snap)
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	restoreSeams := stubPersistSeams(t, map[string][]byte{"live": physDoc})
+	defer restoreSeams()
+
+	// A typed rebuild: only the builder's keys, no model_cache.
+	rebuilt := []byte(`{"type":"workbuddy","provider":"workbuddy","disabled":false,"note":"CN · test","auth":{"accessToken":"tok-live","region":"cn"},"account":{"uid":"u1"},"auth_kind":"oauth"}`)
+	merged := preservePluginDocKeys("workbuddy-live.json", rebuilt)
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(merged, &m); err != nil {
+		t.Fatalf("merged doc unreadable: %v", err)
+	}
+	if _, ok := m["model_cache"]; !ok {
+		t.Fatalf("model_cache not restored by the save funnel")
+	}
+	if string(m["note"]) != `"CN · test"` {
+		t.Fatalf("rebuild's own note must win: %s", m["note"])
+	}
+
+	// Fresh save (no physical file under that name) → nothing to restore.
+	bare := preservePluginDocKeys("workbuddy-brand-new.json", rebuilt)
+	var b map[string]json.RawMessage
+	if err := json.Unmarshal(bare, &b); err != nil {
+		t.Fatalf("bare doc unreadable: %v", err)
+	}
+	if _, ok := b["model_cache"]; ok {
+		t.Fatalf("model_cache must not appear without a physical source")
+	}
+}

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.9.41
+
+### Save-funnel preservation — the typed lifecycle rebuilds no longer wipe the persisted model snapshot
+
+v0.9.38 stamped the per-realm last-known-good model catalog into the
+credential files (top-level `model_cache`), but the lifecycle note-writer
+(`buildAuthFileJSON`) rebuilds the document from a typed struct — every
+credits-note churn silently dropped the snapshot again, and the next
+discovery outage advertised nothing until the next successful discovery.
+
+- **authfile.go**: the `hostAuthSaveJSON` funnel now re-injects whitelisted
+  plugin-stamped keys (`model_cache`) that the incoming document is missing
+  but the physical file carries. A caller-supplied key always wins; fresh
+  saves with no physical source restore nothing.
+- **models_persist.go**: `preservePluginDocKeys` + `physicalDocByName`
+  (best-effort, read-merge-write). A whitelist (not a blanket merge) so a
+  rebuild can never smuggle arbitrary stale keys from a same-named older
+  file.
+- Tests: snapshot restoration through the funnel, rebuild-wins-its-own-keys,
+  fresh-save no-op.
+
 ## 0.9.40
 
 ### Panel model-exclusion picker — check models off a per-realm catalog instead of hand-typing ids
