@@ -75,6 +75,32 @@ func resolveAutoModel(model string) string {
 	return model
 }
 
+// skLaneModelID maps the desktop-facing alias onto the versioned model id the
+// PUBLIC gateway serves (api.xiaomimimo.com/v1). The desktop never needs this:
+// it rides its own proxy lane where the region gateway rewrites aliases
+// server-side. Measured 2026-09-27 — cookie lane answers mimo-pro with
+// model=mimo-v2.6-pro and mimo-flash with model=mimo-v2.6-flash; the public
+// sk-lane gateway rejects the bare alias with 400 "Unsupported model
+// mimo-pro". The map is exactly {alias → upstream's own rewrite output};
+// everything else passes through untouched so new versioned ids and future
+// aliases are never double-mapped.
+func skLaneModelID(model string) string {
+	seg := model
+	if i := strings.LastIndex(model, "/"); i >= 0 {
+		seg = model[i+1:]
+	}
+	switch seg {
+	case ModelMimoPro:
+		seg = "mimo-v2.6-pro"
+	case ModelMimoFlash:
+		seg = "mimo-v2.6-flash"
+	}
+	if i := strings.LastIndex(model, "/"); i >= 0 {
+		return model[:i+1] + seg
+	}
+	return seg
+}
+
 // isAllowedModel mirrors the desktop's lp() core check (2003-2005): mimo-auto
 // itself, the whitelisted flash/pro pair, or any mimo-* id behind the
 // permissive prefix switch. Unknown third-party ids fall through to the

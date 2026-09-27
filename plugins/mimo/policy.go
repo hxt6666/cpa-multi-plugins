@@ -23,13 +23,18 @@ func (e *statusError) Unwrap() error   { return e.err }
 
 // upstreamStatusError wraps a translated upstream chat failure with the HTTP
 // status the host cooldown layer should attribute to the credential.
-// Only unambiguous account-level statuses pass (401/402/429). 403 and the
-// request-level shapes stay status-less — the host's 1-minute transient
-// default applies.
+// 401/402/429 pass (account-level), and 400 rides along too: without it the
+// host synthesizes a 500 for what is a client error and re-queues a request
+// that can never succeed (measured 2026-09-27: "Unsupported model" → client
+// saw HTTP 500). Host-side a 400 is safe: "unsupported model"-style bodies
+// map to a MODEL-scoped cooldown via isModelSupportResultError, everything
+// else falls to the transient default. 403 and the request-level shapes
+// stay status-less — the host's 1-minute transient default applies.
 func upstreamStatusError(status int, err error) error {
 	if status == http.StatusUnauthorized ||
 		status == http.StatusPaymentRequired ||
-		status == http.StatusTooManyRequests {
+		status == http.StatusTooManyRequests ||
+		status == http.StatusBadRequest {
 		return &statusError{status: status, err: err}
 	}
 	return err

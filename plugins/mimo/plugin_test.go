@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -150,18 +151,56 @@ func TestBuildChatBodyPrivacyStrip(t *testing.T) {
 	if obj["stream"] != true {
 		t.Fatalf("stream should be pinned to true, got %v", obj["stream"])
 	}
-	// Key lane: no model rewrite, same strip.
+	// Key lane: mimo-auto resolves through to the versioned public-gateway
+	// id (0.2.12 — the public gateway rejects bare aliases), same strip.
 	body2, err := buildChatBody(payload, "mimo-auto", false, laneKey)
 	if err != nil {
 		t.Fatalf("build key lane: %v", err)
 	}
 	var obj2 map[string]any
 	_ = json.Unmarshal([]byte(body2), &obj2)
-	if obj2["model"] != "mimo-auto" {
-		t.Fatalf("key lane must not rewrite the model, got %v", obj2["model"])
+	if obj2["model"] != "mimo-v2.6-pro" {
+		t.Fatalf("key lane should resolve mimo-auto to the versioned id, got %v", obj2["model"])
 	}
 	if obj2["stream"] != false {
 		t.Fatalf("stream should be pinned to false, got %v", obj2["stream"])
+	}
+}
+
+func TestSkLaneModelID(t *testing.T) {
+	cases := map[string]string{
+		"mimo-pro":           "mimo-v2.6-pro",
+		"mimo-flash":         "mimo-v2.6-flash",
+		"mimo-auto":          "mimo-auto", // pure alias map; auto resolves in buildChatBody
+		"agent/mimo-pro":     "agent/mimo-v2.6-pro",
+		"mimo-v2.6-pro":      "mimo-v2.6-pro", // versioned passthrough
+		"mimo-v2.5-pro":      "mimo-v2.5-pro", // other versions untouched
+		"mimo-x-pro-preview": "mimo-x-pro-preview",
+		"glm-5.3":            "glm-5.3",
+		"":                   "",
+	}
+	for in, want := range cases {
+		if got := skLaneModelID(in); got != want {
+			t.Fatalf("skLaneModelID(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestUpstreamStatusErrorCarries400(t *testing.T) {
+	for _, status := range []int{401, 402, 429, 400} {
+		err := upstreamStatusError(status, fmt.Errorf("boom"))
+		var se *statusError
+		if !errors.As(err, &se) || se.StatusCode() != status {
+			t.Fatalf("status %d must ride statusError, got %v", status, err)
+		}
+	}
+	// 403/404/413 stay status-less: account-ambiguous or request-level.
+	for _, status := range []int{403, 404, 413} {
+		err := upstreamStatusError(status, fmt.Errorf("boom"))
+		var se *statusError
+		if errors.As(err, &se) {
+			t.Fatalf("status %d must stay status-less", status)
+		}
 	}
 }
 

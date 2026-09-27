@@ -2,8 +2,13 @@
 //
 // Wire parity with the official clients (docs/MIMO_AUTH.md §2/§5):
 //   - sk lane: POST {base_url}/chat/completions, Authorization: Bearer {sk},
-//     X-Mimo-Source: mimocode-cli. Model passes through untouched (the
-//     desktop rewrites models only on its own proxy lane — S() 2003-2005).
+//     X-Mimo-Source: mimocode-cli. The desktop NEVER hits this public
+//     gateway, so there is no desktop rewrite to mirror here: mimo-auto
+//     resolves to mimo-pro (desktop EE/k6 parity) and the bare aliases map
+//     onto the versioned ids the gateway actually serves (skLaneModelID —
+//     measured 2026-09-27: the public gateway rejects the bare alias with
+//     400 "Unsupported model mimo-pro"; its own cookie-lane rewrite answers
+//     mimo-pro with model=mimo-v2.6-pro).
 //   - cookie lane: POST {region base}/route/chat/completions, NO
 //     Authorization, X-Mimo-Source: mimocode-cli-free, X-Client-Version,
 //     assembled ticket cookie (exchange.go buildCookieHeader order);
@@ -70,8 +75,9 @@ var privacyStripFields = []string{
 	"user", "metadata", "service_tier", "logprobs", "top_logprobs", "logit_bias",
 }
 
-// buildChatBody prepares the upstream request body: model rewritten (cookie
-// lane only), stream pinned per path, privacy fields stripped.
+// buildChatBody prepares the upstream request body: model resolved per lane
+// (cookie: alias rewrite only; sk: alias + versioned public-gateway id),
+// stream pinned per path, privacy fields stripped.
 func buildChatBody(payload []byte, upstreamModel string, stream bool, lane string) (string, error) {
 	if len(payload) == 0 {
 		return "", fmt.Errorf("empty chat payload")
@@ -80,9 +86,9 @@ func buildChatBody(payload []byte, upstreamModel string, stream bool, lane strin
 	if err := json.Unmarshal(payload, &obj); err != nil {
 		return "", fmt.Errorf("payload parse: %w", err)
 	}
-	model := upstreamModel
-	if lane == laneCookie {
-		model = resolveAutoModel(upstreamModel)
+	model := resolveAutoModel(upstreamModel) // desktop EE/k6 parity, both lanes
+	if lane == laneKey {
+		model = skLaneModelID(model) // the public gateway serves versioned ids only
 	}
 	modelJSON, _ := json.Marshal(model)
 	obj["model"] = modelJSON
