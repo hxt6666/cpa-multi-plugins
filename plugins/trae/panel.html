@@ -389,6 +389,7 @@ function bindCardActions(root){
       const uid=ev.currentTarget.dataset.uid||"";
       if(act==="checkin") checkin(idx, uid, ev.currentTarget);
       else if(act==="refresh") refreshCredits(idx, ev.currentTarget);
+      else if(act==="release") releaseCooldown(idx, uid, ev.currentTarget);
     });
   });
 }
@@ -443,6 +444,8 @@ function card(a){
   const uidAttr=(a.uid?` data-uid="${escAttr(a.uid)}"`:"");
   const actionHTML=isIntl?"":`<button class="${btnClass}" data-action="checkin" data-auth-index="${escAttr(a.auth_index)}"${uidAttr}${btnDisabled}>${btnText}</button>`;
   const refreshBtn=isIntl?"":`<button class="sec" data-action="refresh" data-auth-index="${escAttr(a.auth_index)}"${uidAttr} title="查询实时积分">刷新积分</button>`;
+  // v0.12.67: 配额冻结手动解除（池冷却徽标在场即可点；禁用态不在此列，重登才是解法）。
+  const releaseBtn=(!isIntl&&cooling)?`<button class="sec" data-action="release" data-auth-index="${escAttr(a.auth_index)}"${uidAttr} title="清除配额耗尽冻结；宿主侧 30 分钟模型冷却同步走 CPA「重置配额」">解除冷却</button>`:"";
   const bodyHTML=isIntl
     ? ((a.token_expiry?`<div class="row"><span class="k">Token 到期</span><span class="v">${esc(String(a.token_expiry).replace('T',' ').replace('Z',' UTC'))}</span></div>`:"")
        +(a.region?`<div class="row"><span class="k">区域</span><span class="v">${esc(a.region)}</span></div>`:"")
@@ -463,7 +466,7 @@ function card(a){
   ${bodyHTML}
   ${a.error?`<div class="row"><span class="k">错误</span><span class="v err">${esc(a.error)}</span></div>`:""}
   ${pool.reason&&!cooling?`<div class="row"><span class="k">池状态</span><span class="v warn">${esc(pool.reason)}</span></div>`:""}
-  ${(refreshBtn||actionHTML)?`<div class="actions">${refreshBtn}${actionHTML}</div>`:""}
+  ${(refreshBtn||actionHTML||releaseBtn)?`<div class="actions">${refreshBtn}${actionHTML}${releaseBtn}</div>`:""}
   </div>`;
 }
 function applyCreditsResult(a, res){
@@ -884,6 +887,24 @@ async function checkinAll(btn){
     await load(false);
   }catch(e){toast("批量签到失败","err",e.message)}
   busy(btn,false);
+}
+async function releaseCooldown(idx, uid, btn){
+  busy(btn,true);
+  try{
+    // v0.12.67: 清插件池冻结 + 联动宿主原生 reset-quota（同管理密钥）——
+    // 后者清掉 CPA 侧 402 的 30 分钟模型冷却；一次点击两层都解。
+    const d=await api("/release",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({uid:uid||"",auth_index:idx||""})});
+    if(d.error){ toast("解除失败","err",d.error); busy(btn,false); return; }
+    try{
+      await hostAPI("/reset-quota",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({auth_index:idx})});
+    }catch(_){ /* 宿主侧冷却最多残留 30 分钟，不阻塞插件层解除 */ }
+    const who=(d.status&&d.status.nickname)||d.uid||idx||"账号";
+    toast("已解除冷却","ok",who+" · 插件池冻结已清"+(idx?"，已同步请求宿主重置配额":""));
+    await load(false);
+  }catch(e){
+    toast("解除请求失败","err",e.message||String(e));
+    busy(btn,false);
+  }
 }
 async function refreshCredits(idx, btn){
   busy(btn,true);

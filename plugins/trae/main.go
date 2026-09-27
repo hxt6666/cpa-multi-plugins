@@ -1976,6 +1976,15 @@ func handleExecExecute(request []byte) ([]byte, error) {
 		persistRefreshedAuth(req, a)
 	}
 
+	// v0.12.67: 配额冻结闸门。池里处于 1005/4008/巡检归零冻结的凭证先做
+	// 一次轻量积分探测（ent-usage，不打聊天上游）：余量已恢复 → 解冻放行
+	// （CPA 面板「重置配额」或 0 点补额由此端到端生效）；仍为 0 → 直接 402，
+	// 省掉一次注定失败的聊天调用。探测失败/未知 → 放行（真耗尽时 chat 402
+	// 会再次冻结：自我修正，不会假恢复）。
+	if quotaGate(accountPool, a) == gateRefuse {
+		return nil, upstreamStatusError(http.StatusPaymentRequired, fmt.Errorf(
+			"该账号处于配额耗尽冻结（至次日本地 0 点），已在调用上游前拦截；积分恢复后点面板「解除冷却」或用 CPA「重置配额」立即恢复 // quota-exhaustion freeze active (until local midnight); release via the panel button or CPA reset-quota"))
+	}
 	// Call ChatStream (always stream upstream; aggregate for non-stream).
 	// issue #13 诊断：入口指纹行（TRAE_DEBUG_PAYLOAD=1 时输出），与 ChatStream
 	// 的 prepared 行对齐后可实测非流式/流式两条链的出站请求是否一致。
@@ -2180,6 +2189,15 @@ func handleExecStream(request []byte) ([]byte, error) {
 		persistRefreshedAuth(req.ExecutorRequest, a)
 	}
 
+	// v0.12.67: 配额冻结闸门。池里处于 1005/4008/巡检归零冻结的凭证先做
+	// 一次轻量积分探测（ent-usage，不打聊天上游）：余量已恢复 → 解冻放行
+	// （CPA 面板「重置配额」或 0 点补额由此端到端生效）；仍为 0 → 直接 402，
+	// 省掉一次注定失败的聊天调用。探测失败/未知 → 放行（真耗尽时 chat 402
+	// 会再次冻结：自我修正，不会假恢复）。
+	if quotaGate(accountPool, a) == gateRefuse {
+		return nil, upstreamStatusError(http.StatusPaymentRequired, fmt.Errorf(
+			"该账号处于配额耗尽冻结（至次日本地 0 点），已在调用上游前拦截；积分恢复后点面板「解除冷却」或用 CPA「重置配额」立即恢复 // quota-exhaustion freeze active (until local midnight); release via the panel button or CPA reset-quota"))
+	}
 	// issue #13 诊断：同 handleExecExecute，两入口指纹行使两条执行链可对比。
 	upstream.LogChatHead("stream", req.Model, req.Payload)
 	// issue #18: 同 handleExecExecute——req.Model 优先，body 名字仅作回退。
@@ -2287,6 +2305,58 @@ func handleExecStream(request []byte) ([]byte, error) {
 }
 
 // -----------------------------------------------------------------------------
+// Quota freeze gate (v0.12.67)
+// -----------------------------------------------------------------------------
+
+// gateDecision is the outcome of the quota-freeze gate for one execute call.
+type gateDecision int
+
+const (
+	gateProceed gateDecision = iota // serve normally (not frozen / thawed / inconclusive)
+	gateRefuse                      // frozen and the probe confirms the credits are still empty
+)
+
+// quotaGate decides whether a pool-frozen credential may serve this request.
+// The probe is the real ent-usage call; quotaGateProbe is the testable core.
+func quotaGate(p *pool.Pool, a *auth.Auth) gateDecision {
+	return quotaGateProbe(p, a, upstreamClient.UserEntUsage)
+}
+
+// quotaGateProbe implements the gate: a frozen credential gets ONE lightweight
+// ent-usage probe (never a chat call). remain>0 → thaw and proceed; known-zero
+// → refuse; unknown remain or probe error → fail-open (the chat attempt itself
+// re-cools on 402/4008, so fail-open never sticks).
+func quotaGateProbe(p *pool.Pool, a *auth.Auth, probe func(*auth.Auth) (*upstream.EntUsageResult, error)) gateDecision {
+	if p == nil || a == nil {
+		return gateProceed
+	}
+	frozen, _, reason := p.QuotaFreeze(a.UID)
+	if !frozen {
+		return gateProceed
+	}
+	usage, err := probe(a)
+	if err == nil {
+		// 池里只有 CN/SOLO 账号（intl 凭证不进池，见 handleParseAuth 注释）。
+		remain, known := upstream.PackListRemain(usage.UserEntitlementPackList, true)
+		if known && remain > 0 {
+			// 上游已补额/用户已充值：解冻并放行 —— CPA 面板「重置配额」
+			// 与次日 0 点窗口的自动恢复都由此闭环。
+			p.ReenableIfCredits(a.UID, remain)
+			log.Printf("quota gate uid=%s: probe remain=%d — thawed (%s)", a.UID, remain, reason)
+			return gateProceed
+		}
+		if known && remain <= 0 {
+			log.Printf("quota gate uid=%s: probe remain=0 — refusing before chat (%s)", a.UID, reason)
+			return gateRefuse
+		}
+		// remain 未知（Free 等无 pack 账号）→ 不猜测，放行。
+	} else {
+		log.Printf("quota gate uid=%s: probe unavailable (%v) — proceeding", a.UID, err)
+	}
+	return gateProceed
+}
+
+// -----------------------------------------------------------------------------
 // Cooldown / lifecycle
 // -----------------------------------------------------------------------------
 
@@ -2362,7 +2432,7 @@ func applyCooldownOn(p *pool.Pool, uid string, kind upstream.ErrKind) {
 		// 自我修正，不会假恢复。
 		d := pool.UntilNextMidnight()
 		p.Cooldown(uid, pool.CoolPlan, d, fmt.Sprintf(
-			"quota exhausted (1005/4008) — resumes at local midnight (%s)",
+			pool.ReasonQuotaChat+" — resumes at local midnight (%s)",
 			time.Now().Add(d).Format("2006-01-02 15:04")))
 	case upstream.ErrSoftRate:
 		p.Cooldown(uid, pool.CoolSoft, 60*time.Second, "soft rate limit (429)")

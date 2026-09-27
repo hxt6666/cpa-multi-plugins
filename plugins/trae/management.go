@@ -93,6 +93,7 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodGet, Path: base + "/credits", Description: "Get real-time credits for one (auth_index query) or all accounts."},
 			{Method: http.MethodPost, Path: base + "/refresh", Description: "Force refresh access tokens for all accounts and return the refreshed dashboard (accounts)."},
 			{Method: http.MethodGet, Path: base + "/status", Description: "Account-pool state: cooling / disabled reasons per account."},
+			{Method: http.MethodPost, Path: base + "/release", Description: "Manually release a quota-exhaustion freeze (1005/4008 / scan-zero) for one account (uid, or auth_index fallback). Pair with CPA reset-quota for the host-side 30-min model cooldown."},
 			{Method: http.MethodPost, Path: base + "/import", Description: "Import Trae credential JSON (nested or flat) into host auth store."},
 			{Method: http.MethodGet, Path: base + "/intl/accounts", Description: "Trae Intl: list accounts with uid, nickname, and token expiry."},
 			{Method: http.MethodGet, Path: base + "/intl/status", Description: "Trae Intl: plugin status."},
@@ -159,6 +160,8 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleRefresh()))
 	case req.Method == http.MethodGet && path == base+"/status":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, buildPoolStatus()))
+	case req.Method == http.MethodPost && path == base+"/release":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleCooldownRelease(req)))
 	case req.Method == http.MethodPost && path == base+"/import":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleImportAuth(req)))
 	case req.Method == http.MethodGet && path == base+"/models/groups":
@@ -359,6 +362,49 @@ func buildPoolStatus() map[string]any {
 		"provider":    providerName,
 		"accounts":    statuses,
 		"server_time": time.Now().Format("2006-01-02 15:04:05"),
+	}
+}
+
+// handleCooldownRelease clears a quota-exhaustion freeze on demand — the
+// panel's 「解除冷却」 button (v0.12.67). Body: {"uid":"..."} preferred, or
+// {"auth_index":"..."} resolved via hostAuthGet. Disabled accounts are
+// reported untouched (their session is dead; only a re-login fixes them).
+// The host-side 30-min model cooldown is cleared by the PANEL calling the
+// CPA-native POST /v0/management/reset-quota with the same management key —
+// plugin RPC has no host method for it, so the two-line handshake lives in
+// panel.js releaseCooldown().
+func handleCooldownRelease(req pluginapi.ManagementRequest) map[string]any {
+	var body struct {
+		UID       string `json:"uid"`
+		AuthIndex string `json:"auth_index"`
+	}
+	if len(req.Body) > 0 {
+		_ = json.Unmarshal(req.Body, &body)
+	}
+	uid := strings.TrimSpace(body.UID)
+	if uid == "" {
+		if idx := strings.TrimSpace(body.AuthIndex); idx != "" {
+			sa, err := hostAuthGet(idx)
+			if err != nil {
+				return map[string]any{"error": "resolve auth_index: " + err.Error()}
+			}
+			uid = sa.Account.UID
+		}
+	}
+	if uid == "" {
+		return map[string]any{"error": "uid or auth_index required"}
+	}
+	if accountPool == nil {
+		return map[string]any{"error": "pool unavailable"}
+	}
+	st, ok := accountPool.Release(uid)
+	if !ok {
+		return map[string]any{"error": "uid not in pool: " + uid, "released": false}
+	}
+	return map[string]any{
+		"released": true,
+		"uid":      uid,
+		"status":   st,
 	}
 }
 

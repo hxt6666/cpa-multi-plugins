@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -169,6 +170,64 @@ func UntilNextMidnight() time.Duration {
 	now := time.Now()
 	next := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local).Add(24 * time.Hour)
 	return next.Sub(now)
+}
+
+// Quota-freeze reason prefixes (v0.12.67). Only these two cooldown kinds
+// block execution at the executor gate — soft 429 / 404 / error-threshold
+// coolings ride out their short windows without a credits probe.
+const (
+	// ReasonQuotaChat is stamped by applyCooldownOn on 1005/4008
+	// (executor chat path); the resume timestamp is appended.
+	ReasonQuotaChat = "quota exhausted (1005/4008)"
+	// ReasonQuotaScan is stamped by the check-in scan on known-and-zero
+	// pack remain (scheduler.go).
+	ReasonQuotaScan = "credits exhausted (check-in scan: 0)"
+)
+
+// IsQuotaFreezeReason reports whether a pool reason marks the
+// freeze-until-local-midnight quota exhaustion state.
+func IsQuotaFreezeReason(reason string) bool {
+	return strings.HasPrefix(reason, ReasonQuotaChat) ||
+		strings.HasPrefix(reason, ReasonQuotaScan)
+}
+
+// QuotaFreeze reports whether uid is inside a quota-exhaustion freeze
+// (1005/4008 or check-in-scan zero) whose until is still in the future.
+// The executor gate consults this before hitting the chat upstream; every
+// other cooling kind proceeds untouched.
+func (p *Pool) QuotaFreeze(uid string) (bool, time.Time, string) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return false, time.Time{}, ""
+	}
+	now := time.Now()
+	if e.until.IsZero() || !now.Before(e.until) {
+		return false, time.Time{}, ""
+	}
+	if !IsQuotaFreezeReason(e.reason) {
+		return false, time.Time{}, ""
+	}
+	return true, e.until, e.reason
+}
+
+// Release manually clears a cooldown (NOT a disable) — the panel's
+// "解除冷却" action (v0.12.67). Returns the refreshed status and whether the
+// account existed. Disabled accounts stay disabled: their session is dead
+// and only a re-login (or credential re-import) fixes them.
+func (p *Pool) Release(uid string) (Status, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return Status{}, false
+	}
+	e.until = time.Time{}
+	e.reason = ""
+	e.errCount = 0
+	p.saveLocked()
+	return p.statusOf(uid, e), true
 }
 
 // Cooldown 冷却账号至 now+d。
