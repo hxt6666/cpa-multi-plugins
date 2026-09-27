@@ -72,6 +72,15 @@ var soloPlanLimitCodes = map[int64]struct{}{1005: {}, 4008: {}}
 // FetchModels 名单过滤，兜底仍会漏网）会把健康账号累计冷却。
 var soloModelMismatchCodes = map[int64]struct{}{4001: {}}
 
+// IsPlanLimitCode reports whether an in-stream biz code means the account
+// plan/quota is exhausted (1005/4008). Distinct from the credits balance:
+// upstream keeps them as two ledgers (v0.12.48: a card with 200 credits
+// still hit 4008), so 402 copy must not conflate the two.
+func IsPlanLimitCode(code int64) bool {
+	_, ok := soloPlanLimitCodes[code]
+	return ok
+}
+
 // IsModelMismatchCode reports whether an in-stream biz code means the model
 // is not available on the current chat lane (request-level failure).
 func IsModelMismatchCode(code int64) bool {

@@ -303,8 +303,14 @@ func usageQuotaStamp(authIndex, authID, plan, windowStart, windowEnd string, rem
 		}
 	}
 	if a == nil {
-		usageLedgerState.Unlock()
-		return // no requests observed yet — the note has nothing to refresh anyway
+		// v0.12.65: the quota fold-in now feeds the note's credit segment,
+		// so a credential with zero observed requests (fresh install,
+		// all-failed traffic, brand-new account) still gets an entry — the
+		// old "no requests, nothing to refresh" early-out left those
+		// cards without any quota display at all.
+		led = usageLedgerLocked()
+		a = &usageAccount{Days: map[string]*usageTotals{}, Hours: map[string]*usageTotals{}}
+		led.Accounts[authIndex] = a
 	}
 	a.Quota = &usageQuotaState{
 		Plan:        plan,
@@ -388,8 +394,11 @@ func usageNoteSegmentFor(authIndex string, now time.Time) string {
 	defer usageLedgerState.Unlock()
 	led := usageLedgerLocked()
 	a := led.Accounts[authIndex]
-	if a == nil || a.Total.Requests == 0 {
+	if a == nil {
 		return ""
+	}
+	if a.Total.Requests == 0 && a.Quota == nil {
+		return "" // nothing observed and no quota snapshot — nothing to say
 	}
 	start := led.StartedAt
 	if len(start) < 10 {
@@ -399,6 +408,17 @@ func usageNoteSegmentFor(authIndex string, now time.Time) string {
 	b.WriteString(usageSegmentMarker)
 	fmt.Fprintf(&b, "(自%s)", start[:10])
 	fmt.Fprintf(&b, " 今日 请求%d · Tok %s", usageDayTotal(a, now), usageHumanTokens(usageDayTokens(a, now)))
+	if q := a.Quota; q != nil {
+		// v0.12.65: credit segment — the pool-first standard quota the
+		// /credits fold-in stamped (workbuddy/qoder parity for the host's
+		// local credential management). A real 0 shows as 0 (真实耗尽);
+		// "unknown" never reaches the ledger (the stamp side skips it).
+		seg := fmt.Sprintf(" ｜ 余%d · 已用%d", q.Remain, q.Used)
+		if q.Plan != "" {
+			seg += " · " + q.Plan
+		}
+		b.WriteString(seg)
+	}
 	if ok, fromKey, toKey := usageWindowBounds(a, now); ok {
 		w := usageSumHours(a, fromKey, toKey)
 		fmt.Fprintf(&b, " ｜ 窗口%s→%s 请求%d · Tok %s", usageHourLabel(fromKey), usageHourLabelEnd(toKey), w.Requests, usageHumanTokens(w.Tokens))
@@ -571,12 +591,17 @@ func usagePhysicalDoc(key string) (string, []byte, bool) {
 // draw down); trae exposes no reset-window bounds, so Window bounds stay
 // empty and the note renders the no-window fallback line.
 func usageQuotaStampFromSummary(authIndex string, sum upstream.UsageSummary) {
+	// v0.12.65: both dimensions unknown -> write nothing. The old fallback
+	// stamped remain=0, but 0 is a REAL number (exhausted): one failed/empty
+	// ent_usage fetch flipped the card to 余0. Real zeros (CreditsPool.Known
+	// with Remain=0) still stamp — that is the truth worth recording;
+	// "unknown" keeps the previous segment (workbuddy prev-guard parity).
+	if !sum.RemainKnown && !sum.CreditsPool.Known {
+		return
+	}
 	remain := sum.Remain
 	if sum.CreditsPool.Known {
 		remain = sum.CreditsPool.Remain
-	}
-	if !sum.RemainKnown && !sum.CreditsPool.Known {
-		remain = 0
 	}
 	usageQuotaStamp(authIndex, "", sum.PlanType, "", "", remain, sum.Used, sum.Total)
 }

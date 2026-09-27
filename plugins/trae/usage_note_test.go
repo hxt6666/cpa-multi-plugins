@@ -142,3 +142,114 @@ func TestUsageQuotaStampFromSummary(t *testing.T) {
 		t.Fatalf("trae exposes no window bounds: %+v", a.Quota)
 	}
 }
+
+func TestUsageQuotaUnknownStampsNothingTrae(t *testing.T) {
+	resetUsageNoteTestState(t)
+	defer resetUsageNoteTestState(t)
+
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	usageLedgerObserve("idx-1", "", 1000, false, now)
+	// Both dimensions unknown (failed/empty ent_usage) must NOT stamp a 0 —
+	// 0 is a real number (exhausted); unknown keeps the previous state.
+	usageQuotaStampFromSummary("idx-1", upstream.UsageSummary{
+		PlanType:    "Pro",
+		Remain:      0,
+		RemainKnown: false,
+		Used:        0,
+		Total:       0,
+		CreditsPool: upstream.CreditsPoolInfo{Remain: 0, Known: false},
+	})
+
+	usageLedgerState.Lock()
+	a := usageLedgerState.ledger.Accounts["idx-1"]
+	usageLedgerState.Unlock()
+	if a == nil {
+		t.Fatal("account entry missing")
+	}
+	if a.Quota != nil {
+		t.Fatalf("unknown quota must not stamp (would fabricate 余0): %+v", a.Quota)
+	}
+
+	// A previously stamped quota survives the unknown fetch (prev-guard).
+	usageQuotaStampFromSummary("idx-1", upstream.UsageSummary{
+		RemainKnown: true, Remain: 3000,
+		CreditsPool: upstream.CreditsPoolInfo{Remain: 3210, Known: true},
+	})
+	usageQuotaStampFromSummary("idx-1", upstream.UsageSummary{RemainKnown: false})
+	usageLedgerState.Lock()
+	a = usageLedgerState.ledger.Accounts["idx-1"]
+	usageLedgerState.Unlock()
+	if a.Quota == nil || a.Quota.Remain != 3210 {
+		t.Fatalf("prev quota must survive an unknown fetch: %+v", a.Quota)
+	}
+}
+
+func TestUsageQuotaRealZeroStampsTrae(t *testing.T) {
+	resetUsageNoteTestState(t)
+	defer resetUsageNoteTestState(t)
+
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	usageLedgerObserve("idx-1", "", 1000, false, now)
+	// Known pool with Remain=0 is a REAL exhausted state — it must stamp so
+	// the card shows the truth (0) instead of hiding it.
+	usageQuotaStampFromSummary("idx-1", upstream.UsageSummary{
+		RemainKnown: false,
+		CreditsPool: upstream.CreditsPoolInfo{Remain: 0, Known: true},
+	})
+	usageLedgerState.Lock()
+	a := usageLedgerState.ledger.Accounts["idx-1"]
+	usageLedgerState.Unlock()
+	if a.Quota == nil || a.Quota.Remain != 0 {
+		t.Fatalf("real zero must stamp: %+v", a.Quota)
+	}
+	seg := usageNoteSegmentFor("idx-1", now)
+	if !strings.Contains(seg, "余0") {
+		t.Fatalf("real zero must render 余0: %q", seg)
+	}
+}
+
+func TestUsageQuotaZeroRequestAccountGetsEntryTrae(t *testing.T) {
+	resetUsageNoteTestState(t)
+	defer resetUsageNoteTestState(t)
+
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	// No usage records observed at all — the quota fold-in (panel 刷新积分)
+	// must still create the ledger entry so the card gets a credit segment.
+	usageQuotaStampFromSummary("idx-1", upstream.UsageSummary{
+		RemainKnown: true, Remain: 7,
+		CreditsPool: upstream.CreditsPoolInfo{Remain: 1234, Known: true},
+	})
+	usageLedgerState.Lock()
+	a := usageLedgerState.ledger.Accounts["idx-1"]
+	usageLedgerState.Unlock()
+	if a == nil {
+		t.Fatal("zero-request account must get a ledger entry for quota fold-in")
+	}
+	seg := usageNoteSegmentFor("idx-1", now)
+	if !strings.Contains(seg, "余1234") || !strings.Contains(seg, usageSegmentMarker) {
+		t.Fatalf("credit segment must render on a zero-request account: %q", seg)
+	}
+	if strings.Contains(seg, "该账号暂未解析出额度窗口") == false {
+		t.Fatalf("no-window fallback expected: %q", seg)
+	}
+}
+
+func TestUsageNoteSegmentRendersCreditSegmentTrae(t *testing.T) {
+	resetUsageNoteTestState(t)
+	defer resetUsageNoteTestState(t)
+
+	now := time.Date(2026, 9, 27, 12, 30, 0, 0, time.UTC)
+	usageLedgerObserve("idx-1", "", 1000, false, now.Add(-30*time.Minute))
+	usageQuotaStampFromSummary("idx-1", upstream.UsageSummary{
+		PlanType:    "SOLO Pro",
+		RemainKnown: true, Remain: 12,
+		CreditsPool: upstream.CreditsPoolInfo{Remain: 3000, Known: true},
+		Used:        8,
+	})
+	seg := usageNoteSegmentFor("idx-1", now)
+	for _, want := range []string{"【用量】", "余3000", "已用8", "SOLO Pro", "累计 请求1"} {
+		if !strings.Contains(seg, want) {
+			t.Fatalf("segment missing %q: %q", want, seg)
+		}
+	}
+}

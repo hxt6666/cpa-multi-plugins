@@ -140,7 +140,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.64"
+var version = "0.12.65"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -2317,6 +2317,14 @@ func soloStreamErrorCopy(se *upstream.SOLOStreamError) error {
 	if se.Kind() == upstream.ErrModelUnavailable {
 		return fmt.Errorf("%w —— 该模型不在当前聊天通道可用（模型配置不匹配，请求级问题，与账号无关）：请改用模型列表中的其他模型", se)
 	}
+	if se.Kind() == upstream.ErrPlanLimit {
+		// v0.12.65: 1005/4008 账号级配额耗尽。积分余额与模型配额是两笔账
+		// （v0.12.48 实证：面板还有积分的号也中招 4008）；积分若突变为 0，
+		// 多为积分有效期到期或风控回收（2026-08/09 上游积分体系调整期），
+		// 请到官网「订阅管理 → 积分明细」对照官方口径，误判可去
+		// forum.trae.cn 申诉。
+		return fmt.Errorf("%w —— 账号级配额耗尽（积分余额与模型配额是两笔账；积分若突降为 0 多为有效期到期或风控回收，请对照官网「订阅管理→积分明细」，误判可去 forum.trae.cn 申诉）", se)
+	}
 	return se
 }
 
@@ -2332,6 +2340,10 @@ func soloStreamEventMsg(code int64, msg string) string {
 	// 给客户端明确指引而不是裸的 "param is invalid"。
 	if upstream.IsModelMismatchCode(code) {
 		return base + " —— 该模型不在当前聊天通道可用（模型配置不匹配，与账号无关）：请改用模型列表中的其他模型"
+	}
+	// v0.12.65: 1005/4008 流内配额耗尽文案对齐 HTTP 路径（两笔账 + 归零指引）。
+	if upstream.IsPlanLimitCode(code) {
+		return base + " —— 账号级配额耗尽（积分余额与模型配额是两笔账；积分若突降为 0 多为有效期到期或风控回收，请对照官网「订阅管理→积分明细」，误判可去 forum.trae.cn 申诉）"
 	}
 	return base
 }
