@@ -469,6 +469,16 @@ func prependThoughtInPlace(msg map[string]any, thoughtBlock string) bool {
 
 // ensureSystemMessageInPlace is the in-place form of ensureSystemMessage.
 // Returns true when obj was modified.
+//
+// v0.9.37 (issue #20): the Global realm validates messages[0] — a payload
+// whose FIRST message is not a system prompt is rejected (code 11128,
+// "first message is not system prompt"; contract mirrored from
+// zqcccc/workbuddy-cliproxy's ensureSystemFirst). The old any-position
+// scan skipped the injection whenever a client carried a system message
+// mid-history (normalizeHistory's developer→system rewrite preserves
+// position), leaving a user first message for upstream to reject. A
+// system message that is not first no longer suppresses the injection;
+// the Global-only gate is unchanged so CN traffic stays byte-identical.
 func ensureSystemMessageInPlace(obj map[string]any, sa *storedAuth) bool {
 	if sa == nil || !isGlobalDomain(sa.Auth.Domain) {
 		return false
@@ -477,12 +487,10 @@ func ensureSystemMessageInPlace(obj map[string]any, sa *storedAuth) bool {
 	if !ok || len(messages) == 0 {
 		return false
 	}
-	for _, m := range messages {
-		msg, ok := m.(map[string]any)
-		if !ok {
-			continue
-		}
-		if role, _ := msg["role"].(string); strings.EqualFold(role, "system") {
+	// Position, not presence (issue #20): only a system message AT THE
+	// FRONT satisfies the upstream check.
+	if first, ok := messages[0].(map[string]any); ok {
+		if role, _ := first["role"].(string); strings.EqualFold(role, "system") {
 			return false
 		}
 	}
@@ -646,9 +654,13 @@ func rewriteSystemForUpstream(payload []byte) []byte {
 	return out
 }
 
-// ensureSystemMessage injects a minimal system message if none is present.
-// Global (www.workbuddy.ai) rejects user-only requests with code 11101
-// "Parse message failed: 11101:invalid request". CN (copilot.tencent.com)
+// ensureSystemMessage injects a minimal system message unless the FIRST
+// message is already a system prompt. Global (www.workbuddy.ai) rejects
+// user-only requests with code 11101 "Parse message failed: 11101:invalid
+// request", and per issue #20 field evidence any payload whose first
+// message is not system with 11128 — the upstream check is on position,
+// not on the presence of a system message somewhere in the list (mirrors
+// zqcccc/workbuddy-cliproxy's ensureSystemFirst). CN (copilot.tencent.com)
 // does not require a system message but tolerates one. Inserting a
 // harmless system message unifies both paths.
 func ensureSystemMessage(payload []byte, sa *storedAuth) []byte {
@@ -667,13 +679,11 @@ func ensureSystemMessage(payload []byte, sa *storedAuth) []byte {
 	if !ok || len(messages) == 0 {
 		return payload
 	}
-	for _, m := range messages {
-		msg, ok := m.(map[string]any)
-		if !ok {
-			continue
-		}
-		if role, _ := msg["role"].(string); strings.EqualFold(role, "system") {
-			return payload // already has system message
+	// Position, not presence (issue #20): only a system message AT THE
+	// FRONT satisfies the upstream check.
+	if first, ok := messages[0].(map[string]any); ok {
+		if role, _ := first["role"].(string); strings.EqualFold(role, "system") {
+			return payload // first message already system
 		}
 	}
 	systemMsg := map[string]any{

@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.9.37
+
+### Global: the system message must OPEN the conversation — position, not presence
+
+issue #20 (2026-09-26) points at zqcccc/workbuddy-cliproxy, whose
+`ensureSystemFirst` documents the contract we were getting wrong: the
+workbuddy.ai Global gateway validates `messages[0]` — a payload whose first
+message is not a system prompt is rejected with code 11128 ("first message is
+not system prompt"). Our `ensureSystemMessageInPlace` scanned the whole
+message list and skipped the injection whenever a system message existed
+ANYWHERE, so a client that carries system mid-history (Claude-Code-style
+template history, `developer`-role turns normalized in place by
+`normalizeHistoryInPlace`, clients that re-append system after the first user
+turn) sailed past our check and died upstream with 11128.
+
+- **payload.go**: the injection now fires unless `messages[0]` is itself a
+  system message (case-insensitive). A mid-history system message no longer
+  suppresses it; the injected message keeps its "You are a helpful
+  assistant." body and the mid-history one is preserved untouched. The
+  Global-only gate (`isGlobalDomain`) is unchanged — CN traffic stays
+  byte-identical, and the Intl (codebuddy.ai) realm is deliberately out of
+  scope: no first-message evidence exists for that gateway.
+- The standalone `ensureSystemMessage` helper gets the same first-position
+  semantics so the two cannot drift.
+- **payload_system_first_test.go** (new): regression pins for user-first
+  injection, the issue-#20 mid-history case (injected at front, mid-history
+  system preserved), system-first no-op, CN and Intl no-ops, nil/empty
+  safety, and a `prepareUpstreamBody` pipeline test proving a mid-history
+  `developer` turn still ends up behind an opening system message.
+
+Field evidence for the 11128 contract: zqcccc/workbuddy-cliproxy main.go
+`ensureSystemFirst`, cited by issue #20.
+
 ## 0.9.35
 
 ### The catalog is identity-split — global/intl discovery unions both client rosters
