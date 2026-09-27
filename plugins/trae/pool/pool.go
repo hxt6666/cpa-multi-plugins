@@ -160,6 +160,17 @@ func (p *Pool) SetCredits(uid string, credits int64) {
 	p.saveLocked()
 }
 
+// UntilNextMidnight returns the duration to the NEXT local midnight — the
+// resume point for quota-exhausted credentials (v0.12.66). The user-facing
+// credit window is "明天 0 点": if upstream actually refills by then the
+// credential wakes up usable; if not, the next 402/4008 re-cools it (the
+// policy is self-correcting, never a false recovery).
+func UntilNextMidnight() time.Duration {
+	now := time.Now()
+	next := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.Local).Add(24 * time.Hour)
+	return next.Sub(now)
+}
+
 // Cooldown 冷却账号至 now+d。
 func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason string) {
 	p.mu.Lock()

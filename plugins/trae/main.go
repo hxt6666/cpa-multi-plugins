@@ -140,7 +140,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.65"
+var version = "0.12.66"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -2356,7 +2356,14 @@ func applyCooldown(uid string, kind upstream.ErrKind) {
 func applyCooldownOn(p *pool.Pool, uid string, kind upstream.ErrKind) {
 	switch kind {
 	case upstream.ErrPlanLimit:
-		p.Cooldown(uid, pool.CoolPlan, 12*time.Hour, "plan limit (1005)")
+		// v0.12.66: 1005/4008 配额耗尽冷却对齐用户的积分窗口——
+		// 到次日本地 0 点（原固定 12h 会把 0 点已刷新的账号多冻一截）。
+		// 0 点上游若仍未补充额度，下一次 402/4008 会再次冷却：策略
+		// 自我修正，不会假恢复。
+		d := pool.UntilNextMidnight()
+		p.Cooldown(uid, pool.CoolPlan, d, fmt.Sprintf(
+			"quota exhausted (1005/4008) — resumes at local midnight (%s)",
+			time.Now().Add(d).Format("2006-01-02 15:04")))
 	case upstream.ErrSoftRate:
 		p.Cooldown(uid, pool.CoolSoft, 60*time.Second, "soft rate limit (429)")
 	case upstream.ErrSessionDead:

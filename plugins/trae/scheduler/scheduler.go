@@ -210,10 +210,17 @@ func (s *Scheduler) RunCheckinNow() {
 			continue
 		}
 		// SOLO CN 永远是 CN
-		remain, _ := upstream.PackListRemain(usage.UserEntitlementPackList, true)
+		remain, known := upstream.PackListRemain(usage.UserEntitlementPackList, true)
 		// v0.12.40: credits 语义修正——它是签到奖励配置而非可花余额，
 		// 不再计入池子评分（旧 wallet 叠加源于同一误读）。
 		s.cfg.Pool.ReenableIfCredits(st.UID, remain)
+		// v0.12.66: pack 余额明确归零 → 主动冷却到次日 0 点。原逻辑只在
+		// remain>0 时解冻，归零后账号仍 healthy，会被继续选中直到撞挂。
+		if known && remain == 0 {
+			s.cfg.Pool.Cooldown(st.UID, pool.CoolPlan,
+				pool.UntilNextMidnight(),
+				"credits exhausted (check-in scan: 0) — resumes at local midnight")
+		}
 	}
 
 	// v0.12.33: 本轮有 9074 → 当日指数退避自动重试；无 9074 → 复位并撤销挂起定时器。

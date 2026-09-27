@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/mmqz/cpa-multi-plugins/plugins/trae/auth"
+	"github.com/mmqz/cpa-multi-plugins/plugins/trae/pool"
 	"github.com/mmqz/cpa-multi-plugins/plugins/trae/upstream"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -789,6 +790,27 @@ func cachePlan(authIndex string) (p string) {
 	return
 }
 
+// quotaExhaustedKnown reports whether every KNOWN quota source in the summary
+// is zero AND at least one source is known — a trusted "credit exhausted".
+// Since 0.12.65 unknown sources never stamp 0, so a parsed 0 is the upstream's
+// real answer; anything unknown here simply does not vote (v0.12.66).
+func quotaExhaustedKnown(sum upstream.UsageSummary) bool {
+	known := false
+	if sum.RemainKnown {
+		if sum.Remain != 0 {
+			return false
+		}
+		known = true
+	}
+	if sum.CreditsPool.Known {
+		if sum.CreditsPool.Remain != 0 {
+			return false
+		}
+		known = true
+	}
+	return known
+}
+
 // handleCreditsQuery fetches live credits from upstream for one (auth_index)
 // or all accounts. Updates the cache so the next /accounts reflects the new
 // numbers.
@@ -979,6 +1001,13 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 			// v0.12.40: 不再叠加奖励配置（wallet 变量名保留为历史语义，
 			// 现含义 = 签到奖励数额）。
 			accountPool.SetCredits(sa.Account.UID, scoreRemain)
+			// v0.12.66: 已知来源全为 0（至少一个已知）→ 主动冷却到
+			// 次日 0 点，不再等下一次调用撞 402/4008 才被动冷却。
+			if quotaExhaustedKnown(sum) {
+				accountPool.Cooldown(sa.Account.UID, pool.CoolPlan,
+					pool.UntilNextMidnight(),
+					"credits exhausted (0) — resumes at local midnight")
+			}
 		}
 		results = append(results, entry)
 	}
