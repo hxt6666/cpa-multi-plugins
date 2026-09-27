@@ -171,6 +171,11 @@ func hostAuthSaveJSON(name string, raw []byte) error {
 	if raw, err = json.Marshal(doc); err != nil {
 		return err
 	}
+	// v0.8.27: typed buildAuthFileJSON rebuilds (lifecycle notes, adopt,
+	// import) construct a fresh document and would silently drop the
+	// persisted model_cache snapshot. Re-inject whitelisted plugin-stamped
+	// keys the caller didn't set but the physical file carries.
+	raw = preservePluginDocKeys(name, raw)
 	saveReq := pluginapi.HostAuthSaveRequest{
 		Name: name,
 		JSON: raw,

@@ -98,7 +98,7 @@ func fetchDynamicModels() []pluginapi.ModelInfo {
 		if err != nil || sa == nil {
 			continue
 		}
-		dyn, err := callModelsAPI(sa)
+		dyn, err := callModelsAPIFn(sa)
 		if err == nil && len(dyn) > 0 {
 			storeDynamicModels(modelCatalogAccountKey(sa), dyn)
 			return dyn
@@ -116,25 +116,43 @@ func fetchDynamicModelsFromStorage(storageJSON []byte) []pluginapi.ModelInfo {
 	// the account the host is asking about). On miss, discovery runs against
 	// the same credential and the result is stored under its key.
 	key := modelCatalogAccountKey(sa)
+	region := authRegion(sa)
 	if models, ok := cachedDynamicModels(key); ok {
 		return filterCoolingModels(sa, models)
 	}
-	if dyn, err := callModelsAPI(sa); err == nil && len(dyn) > 0 {
+	if dyn, err := callModelsAPIFn(sa); err == nil && len(dyn) > 0 {
 		storeDynamicModels(key, dyn)
+		// v0.8.27: stamp the last-known-good catalog into the credential file
+		// (raw list, pre cooldown filter and pre exclusion — both re-apply on
+		// every serve branch). Change-guarded inside; best-effort.
+		persistModelSnapshot(storageJSON, region, dyn)
 		return filterCoolingModels(sa, dyn)
 	}
-	return filterCoolingModels(sa, fetchDynamicModelsForRegion(authRegion(sa)))
+	// v0.8.27 failure ladder: a live same-region peer discovery still beats
+	// every persisted answer, but the peer path must NOT fall through to the
+	// static guess — that would mask the real persisted catalog. Ladder:
+	// live peer → persisted snapshot → static wbModels().
+	if peer := discoverModelsViaRegionPeers(region); len(peer) > 0 {
+		return filterCoolingModels(sa, peer)
+	}
+	if snap, ok := persistedSnapshotForStorage(storageJSON, region); ok {
+		return filterCoolingModels(sa, snap)
+	}
+	return filterCoolingModels(sa, wbModels())
 }
 
-// fetchDynamicModelsForRegion is the region-scoped fallback used when THIS
-// credential's own discovery fails: only catalogs discovered under the SAME
-// region are accepted, so an intl account can never be handed a cn catalog
-// (different gateway, different model ids) and vice versa (v0.12.76).
-func fetchDynamicModelsForRegion(region string) []pluginapi.ModelInfo {
-	models := wbModels()
+// discoverModelsViaRegionPeers scans same-region peer credentials for a live
+// catalog when THIS credential's own discovery fails (v0.12.76 region
+// boundary: an intl account can never be handed a cn catalog and vice versa).
+// Returns nil when no peer answers — callers decide what fallback applies
+// (persisted snapshot, static list). This split-out form exists so the
+// failure ladder in fetchDynamicModelsFromStorage can slot the persisted
+// model_cache snapshot between "peers answered" and the static guess without
+// the static list masking the snapshot.
+func discoverModelsViaRegionPeers(region string) []pluginapi.ModelInfo {
 	files, err := hostAuthListFiles()
 	if err != nil || len(files) == 0 {
-		return models
+		return nil
 	}
 	// Strict filename-prefix match — same filter as host_auth.go hostAuthList.
 	prefix := providerName + "-"
@@ -153,13 +171,30 @@ func fetchDynamicModelsForRegion(region string) []pluginapi.ModelInfo {
 		if authRegion(sa) != region {
 			continue
 		}
-		dyn, err := callModelsAPI(sa)
+		dyn, err := callModelsAPIFn(sa)
 		if err == nil && len(dyn) > 0 {
 			storeDynamicModels(modelCatalogAccountKey(sa), dyn)
 			return dyn
 		}
 	}
-	return models
+	return nil
+}
+
+// fetchDynamicModelsForRegion is the region-scoped fallback used when THIS
+// credential's own discovery fails: only catalogs discovered under the SAME
+// region are accepted, so an intl account can never be handed a cn catalog
+// (different gateway, different model ids) and vice versa (v0.12.76).
+//
+// v0.8.27: the live peer scan moved to discoverModelsViaRegionPeers (returns
+// nil instead of the static list when no peer succeeds) so callers can slot
+// the persisted model_cache snapshot between "peers answered" and "static
+// guess". This wrapper keeps the historical static-terminated contract for
+// its remaining callers.
+func fetchDynamicModelsForRegion(region string) []pluginapi.ModelInfo {
+	if peer := discoverModelsViaRegionPeers(region); len(peer) > 0 {
+		return peer
+	}
+	return wbModels()
 }
 
 // filterCoolingModels removes models currently cooling for THIS credential
@@ -183,6 +218,10 @@ func filterCoolingModels(sa *storedAuth, models []pluginapi.ModelInfo) []plugina
 
 // fetchDynamicModels calls the QoderWork API to get the latest model list.
 // Falls back to the hardcoded list on any error.
+// callModelsAPIFn is the discovery seam: tests swap it to exercise the
+// for_auth chain without the network. Production always uses callModelsAPI.
+var callModelsAPIFn = callModelsAPI
+
 // callModelsAPI GETs /algo/api/v2/model/list from the QoderWork gateway
 // with COSY signing (same as inference). Returns plain JSON (not QoderEncoding).
 // Falls back to wbModels() on any error.
