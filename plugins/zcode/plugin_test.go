@@ -487,3 +487,38 @@ func TestIsCreditsExhausted(t *testing.T) {
 
 // httpMethodGet guards the const spelling used across send paths.
 var _ = http.MethodGet
+
+func TestModelCatalogForPicker(t *testing.T) {
+	cat := handleModelCatalog()
+	groups, ok := cat["groups"].([]map[string]any)
+	if !ok || len(groups) != 1 {
+		t.Fatalf("expected exactly one group (single-channel plugin): %+v", cat)
+	}
+	g := groups[0]
+	if g["realm"] != providerName {
+		t.Fatalf("group realm must be the provider key: %v", g["realm"])
+	}
+	models, ok := g["models"].([]map[string]string)
+	if !ok || len(models) == 0 {
+		t.Fatalf("catalog must list models: %+v", g)
+	}
+	if g["count"] != len(models) {
+		t.Fatalf("count mismatch: %v vs %d", g["count"], len(models))
+	}
+	full := zcodeModels()
+	if len(models) != len(full) {
+		t.Fatalf("catalog must serve the full zcodeModels table: %d vs %d", len(models), len(full))
+	}
+	byID := map[string]string{}
+	for _, m := range models {
+		if m["id"] == "" {
+			t.Fatalf("model with empty id: %+v", m)
+		}
+		byID[m["id"]] = m["name"]
+	}
+	for _, m := range full {
+		if byID[m.ID] != m.Name {
+			t.Fatalf("catalog entry drift for %s: %q vs %q", m.ID, byID[m.ID], m.Name)
+		}
+	}
+}

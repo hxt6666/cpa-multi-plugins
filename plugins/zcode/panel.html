@@ -48,6 +48,12 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button:disabled{opacity:.5;
 .keybox .krow{display:flex;gap:8px;flex-wrap:wrap}
 .keybox input{flex:1;min-width:220px;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 10px;color:var(--fg);font-size:13px}
 .keybox .khint{font-size:12px;color:var(--mut);margin-top:8px}
+.mg-group{border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:10px;background:var(--card)}
+.mg-hd{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.mg-meta{color:var(--mut);font-size:11px}
+.mg-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:4px 12px;margin-top:8px}
+.mg-item{display:flex;gap:6px;align-items:center;font-size:13px;cursor:pointer;min-width:0}
+.mg-item input{accent-color:var(--acc)}
 </style>
 </head>
 <body>
@@ -59,6 +65,7 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button:disabled{opacity:.5;
     <button onclick="load(false,false)">刷新缓存</button>
     <button onclick="load(true,true)" class="sec">强制刷新配额</button>
     <button onclick="loadPreview()" class="sec">查询可领取</button>
+    <button onclick="modelCtlToggle(this)" class="sec" title="按勾选启用/禁用模型（写入宿主 oauth-excluded-models 的 zcode 键）">模型禁用</button>
     <span class="sub" id="serverTime"></span>
   </div>
   <div class="keybox" id="keyBox" style="display:none">
@@ -68,6 +75,16 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button:disabled{opacity:.5;
       <button onclick="saveKey()">保存并重试</button>
     </div>
     <div class="khint">密钥仅保存在当前浏览器（localStorage，混淆存储），用于调用本插件管理接口；同源自托管管理面板可自动拾取，无需手填。</div>
+  </div>
+  <div class="card" id="modelCtlCard" style="display:none;margin:0 0 14px">
+    <h2>模型禁用
+      <span style="display:flex;gap:6px">
+        <button class="sec" onclick="modelCtlToggle(this)">收起</button>
+      </span>
+    </h2>
+    <div class="sub" style="margin:6px 0 10px">勾选=启用；取消勾选点「保存排除」后，该模型从 zcode 通道的注册列表移除。与 CPA 全局页同一份配置（oauth-excluded-models 的 zcode 键）；被禁模型仍保留在列表中，可随时恢复。</div>
+    <div id="modelGroupsBox"><div class="card">加载中…</div></div>
+    <div style="margin-top:10px"><button onclick="modelGroupsSave(this)">保存排除</button> <span class="sub">宿主热加载后数秒内生效</span></div>
   </div>
   <div id="claimBox" style="display:none"></div>
   <div class="grid" id="cards"></div>
@@ -199,6 +216,82 @@ async function switchPlan(idx, plan){
   toast(r.ok?'已切换到 '+plan:(r.error||'失败')); load(false,false);
 }
 function escHtml(s){return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]})}
+
+// ===== 模型禁用（v0.1.8）=====
+// 目录：GET /plugins/zcode/models（编译内置全目录）。保存：宿主 PATCH
+// /v0/management/oauth-excluded-models 的 zcode 键 — 与 CPA 全局页同一份
+// 配置，无第二真相；运行时 filterExcludedModels 在 model.static 与
+// model.for_auth 都消费它。
+const HOST_API=(typeof base!=="undefined"&&base?base:"")+"/v0/management";
+let modelCtlLoaded=false,modelCtlOpen=false,modelGroupsData=null,modelExclMap=null;
+async function hostAPI(path,opts={}){
+  const headers=Object.assign({},opts.headers||{});
+  if(mgmtKey)headers["Authorization"]="Bearer "+mgmtKey;
+  const r=await fetch(HOST_API+path,Object.assign({},opts,{headers:headers}));
+  const body=await r.json().catch(()=>({error:"bad json"}));
+  if(r.status===401||r.status===403){showKeyBox(MSG_AUTHFAIL+"："+((body&&body.error)||"unauthorized"));}
+  if(!r.ok)throw new Error((body&&body.error)||("宿主 API HTTP "+r.status));
+  return body;
+}
+function modelCtlToggle(btn){
+  const c=document.getElementById("modelCtlCard");
+  modelCtlOpen=!modelCtlOpen;
+  c.style.display=modelCtlOpen?"block":"none";
+  if(modelCtlOpen&&!modelCtlLoaded)modelCtlLoad();
+  if(btn)btn.blur();
+}
+async function modelCtlLoad(){
+  const box=document.getElementById("modelGroupsBox");
+  try{
+    const [g,e]=await Promise.all([api("/models"),hostAPI("/oauth-excluded-models")]);
+    if(g.error){box.innerHTML='<div class="card"><span style="color:var(--err)">'+escHtml(g.error)+'</span></div>';return}
+    modelGroupsData=g;modelExclMap=(e&&e["oauth-excluded-models"])||{};
+    modelCtlLoaded=true;
+    renderModelGroups();
+  }catch(err){box.innerHTML='<div class="card"><span style="color:var(--err)">'+escHtml(err.message||String(err))+'</span></div>'}
+}
+function renderModelGroups(){
+  const box=document.getElementById("modelGroupsBox");
+  const groups=(modelGroupsData&&modelGroupsData.groups)||[];
+  if(!groups.length){box.innerHTML='<div class="card">没有渠道信息</div>';return}
+  box.innerHTML=groups.map(g=>{
+    const excl=new Set(((modelExclMap&&modelExclMap[g.realm])||[]).map(x=>String(x).toLowerCase()));
+    const rows=(g.models||[]).map(m=>{
+      const id=m.id||"";
+      const checked=!excl.has(id.toLowerCase());
+      const label=m.name?escHtml(m.name)+' <span style="color:var(--mut);font-size:11px">'+escHtml(id)+'</span>':escHtml(id);
+      return '<label class="mg-item"><input type="checkbox" data-mg="'+escHtml(g.realm)+'" value="'+escHtml(id)+'"'+(checked?" checked":"")+'>'+label+'</label>';
+    }).join("");
+    const meta=[];
+    if(g.source==="catalog")meta.push("内置目录 "+g.count+" 个");
+    return '<div class="mg-group"><div class="mg-hd"><b>'+escHtml(g.label)+'</b><span class="mg-meta">'+escHtml(meta.join(" · "))+'</span></div><div class="mg-list">'+rows+'</div></div>';
+  }).join("");
+}
+async function modelGroupsSave(btn){
+  const groups=(modelGroupsData&&modelGroupsData.groups)||[];
+  if(!groups.length){toast("先加载模型目录");return}
+  btn.disabled=true;
+  let saved=0;
+  try{
+    for(const g of groups){
+      const realm=g.realm;
+      const checked=new Set([...document.querySelectorAll('input[type=checkbox][data-mg="'+realm+'"]:checked')].map(i=>i.value.toLowerCase()));
+      const keep=(g.models||[]).map(m=>m.id).filter(id=>!checked.has(id.toLowerCase()));
+      const keyExists=!!(modelExclMap&&modelExclMap[realm]);
+      if(keep.length===0){
+        if(!keyExists)continue;
+        await hostAPI("/oauth-excluded-models",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({provider:realm,models:[]})});
+        delete modelExclMap[realm];
+      }else{
+        await hostAPI("/oauth-excluded-models",{method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({provider:realm,models:keep})});
+        modelExclMap[realm]=keep;
+      }
+      saved++;
+    }
+    toast(saved?"排除清单已保存，宿主热加载后数秒内生效":"无变更");
+  }catch(e){toast("保存失败："+(e.message||e))}
+  btn.disabled=false;
+}
 function fmtUnix(sec){try{return new Date(sec*1000).toLocaleString()}catch(e){return sec}}
 async function loadPreview(){
   const box=document.getElementById('claimBox');

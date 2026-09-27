@@ -298,6 +298,7 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodPost, Path: base + "/select", Description: "Select the active account card used for chat routing (body: {auth_index})."},
 			{Method: http.MethodPost, Path: base + "/plan", Description: "Switch an account's plan routing (body: {auth_index, plan: coding-plan|start-plan})."},
 			{Method: http.MethodGet, Path: base + "/cooldowns", Description: "List active per-(account, model) cooldown entries."},
+			{Method: http.MethodGet, Path: base + "/models", Description: "Full zcode model catalog for the panel's exclusion picker (PATCH the host's oauth-excluded-models.zcode key)."},
 			{Method: http.MethodPost, Path: base + "/cooldowns/clear", Description: "Clear cooldown for one account (auth_id) or one pair (auth_id + model)."},
 			{Method: http.MethodGet, Path: base + "/preview", Description: "List claimable trial plans (billing/preview) across accounts. Read-only."},
 			{Method: http.MethodPost, Path: base + "/claim", Description: "Claim one trial plan for one account with the panel-minted Aliyun captcha verify param (billing/claim). The captcha challenge runs in the panel page itself."},
@@ -306,6 +307,28 @@ func managementRegistration() managementRegistrationResponse {
 			{Path: "/panel", Menu: "ZCode", Description: "ZCode dashboard (Z.AI + BigModel): plan, quota, cooldowns."},
 		},
 	}
+}
+
+// handleModelCatalog serves the full zcode catalog for the panel's
+// exclusion picker (v0.1.8). zcode is a single-channel plugin — the
+// provider key IS the channel key in oauth-excluded-models — so one
+// group suffices (trae needs per-variant groups; zcode does not). The
+// picker saves PATCH the host's oauth-excluded-models.zcode key, the
+// same config the global page drives (no second truth); filter-
+// ExcludedModels already consumes it in model.static and model.for_auth.
+func handleModelCatalog() map[string]any {
+	models := make([]map[string]string, 0, 16)
+	for _, m := range zcodeModels() {
+		models = append(models, map[string]string{"id": m.ID, "name": m.Name})
+	}
+	group := map[string]any{
+		"realm":  providerName,
+		"label":  "ZCode",
+		"models": models,
+		"count":  len(models),
+		"source": "catalog",
+	}
+	return map[string]any{"groups": []map[string]any{group}}
 }
 
 func handleManagement(raw []byte) ([]byte, error) {
@@ -350,6 +373,8 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handlePlanSwitch(req)))
 	case req.Method == http.MethodGet && path == base+"/cooldowns":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleCooldownList(req)))
+	case req.Method == http.MethodGet && path == base+"/models":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleModelCatalog()))
 	case req.Method == http.MethodPost && path == base+"/cooldowns/clear":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleCooldownClear(req)))
 	case req.Method == http.MethodGet && path == base+"/preview":
