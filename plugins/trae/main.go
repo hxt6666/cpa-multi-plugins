@@ -140,7 +140,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.62"
+var version = "0.12.63"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -598,7 +598,7 @@ func handleModelForAuth(request []byte) ([]byte, error) {
 	}
 	return okEnvelope(pluginapi.ModelResponse{
 		Provider: providerName,
-		Models:   filterExcludedModels(modelsForVariant(a), req.Host, subKey),
+		Models:   filterExcludedModels(modelsForVariant(a, req.StorageJSON), req.Host, subKey),
 	})
 }
 
@@ -609,14 +609,27 @@ func handleModelForAuth(request []byte) ([]byte, error) {
 // and solo catalogs come from the same live lane; every returned ID gets the
 // variant suffix so identical upstream names never collide across cn/solo
 // credential classes.
-func modelsForVariant(a *auth.Auth) []pluginapi.ModelInfo {
+// fetchModelsFn is the discovery seam: tests swap it to exercise the
+// for_auth chain without the network. Production always uses the shared
+// upstream client.
+var fetchModelsFn = func(a *auth.Auth) ([]upstream.ModelInfo, error) {
+	return upstreamClient.FetchModels(a)
+}
+
+// v0.12.63: storageJSON rides along so the snapshot lifecycle (persist on
+// success, serve last-known-good on failure) can locate the credential's
+// file. modelsForVariant returns the PRE-exclusion advertised catalog.
+func modelsForVariant(a *auth.Auth, storageJSON []byte) []pluginapi.ModelInfo {
 	suffix := ""
 	if a.Variant == variantSolo {
 		suffix = modelSuffixSolo
 	}
-	dynamic, err := upstreamClient.FetchModels(a)
+	dynamic, err := fetchModelsFn(a)
 	if err != nil {
-		log.Printf("model.for_auth %s (%s): %v — falling back to static", a.UID, a.Variant, err)
+		log.Printf("model.for_auth %s (%s): %v — persisted snapshot / static fallback", a.UID, a.Variant, err)
+		if snap, ok := persistedSnapshotForStorage(storageJSON, a.Variant); ok {
+			return snap
+		}
 		return suffixModels(staticForVariant(a.Variant), suffix)
 	}
 	out := make([]pluginapi.ModelInfo, 0, len(dynamic))
@@ -639,8 +652,15 @@ func modelsForVariant(a *auth.Auth) []pluginapi.ModelInfo {
 		})
 	}
 	if len(out) == 0 {
+		if snap, ok := persistedSnapshotForStorage(storageJSON, a.Variant); ok {
+			return snap
+		}
 		return suffixModels(staticForVariant(a.Variant), suffix)
 	}
+	// v0.12.63: stamp the last-known-good catalog into the credential file
+	// (advertised ids, post-suffix, pre exclusion — exclusion re-applies on
+	// every serve branch). Change-guarded inside; best-effort.
+	persistModelSnapshot(storageJSON, a.Variant, out)
 	return out
 }
 

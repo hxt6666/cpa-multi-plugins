@@ -369,6 +369,9 @@ func intlhostAuthGet(authIndex string) (*intlstoredAuth, error) {
 
 // intlhostAuthSave persists credential JSON via host.auth.save RPC.
 func intlhostAuthSave(name string, raw []byte) error {
+	// v0.12.63: re-inject whitelisted plugin-stamped keys (model_cache)
+	// the typed rebuild dropped but the physical file carries.
+	raw = preservePluginDocKeys(name, raw)
 	saveReq := pluginapi.HostAuthSaveRequest{
 		Name: name,
 		JSON: raw,

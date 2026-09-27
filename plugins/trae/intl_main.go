@@ -245,6 +245,20 @@ func intlhandleModelForAuth(request []byte) ([]byte, error) {
 		log.Printf("intl model.for_auth: parse storage failed (%v) — static fallback", err)
 		return okEnvelope(pluginapi.ModelResponse{Provider: intlproviderName, Models: filterExcludedModels(intlstaticModels(), req.Host, providerName+"-intl")})
 	}
+	out := intlmodelCatalogForAuth(req.StorageJSON, req.AuthID, a)
+	// v0.12.62: the intl namespace honors the provider key plus the
+	// "trae-intl" sub-key.
+	out = filterExcludedModels(out, req.Host, providerName+"-intl")
+	return okEnvelope(pluginapi.ModelResponse{Provider: intlproviderName, Models: out})
+}
+
+// intlmodelCatalogForAuth resolves the PRE-exclusion advertised Intl catalog
+// for one credential (v0.12.63): refresh-before-discovery (v0.12.53) → live
+// fetch → persisted snapshot → static. On success the catalog (post-suffix,
+// including the auto/work virtuals) is stamped into the credential file so
+// the panel picker and restart-outage recovery serve real data. Exposed for
+// the picker's ?refresh=1 path, which drives the exact same chain.
+func intlmodelCatalogForAuth(storageJSON []byte, authID string, a *upstream.Auth) []pluginapi.ModelInfo {
 	// v0.12.53: refresh before discovery. The executor path refreshes within
 	// 24h of expiry, but model discovery ran on the raw stored token — an
 	// account left idle past token expiry kept 401-ing discovery forever
@@ -256,12 +270,15 @@ func intlhandleModelForAuth(request []byte) ([]byte, error) {
 		// endpoint flapping) — try discovery with what we have.
 		log.Printf("model.for_auth %s: refresh failed (continuing with stored token): %v", a.UID, rerr)
 	} else if refreshed {
-		intlpersistRefreshedAuthTo(req.AuthID, a)
+		intlpersistRefreshedAuthTo(authID, a)
 	}
 	dynamic, err := intlupstreamClient.FetchModels(a)
 	if err != nil {
-		log.Printf("model.for_auth %s: %v — falling back to static", a.UID, err)
-		return okEnvelope(pluginapi.ModelResponse{Provider: intlproviderName, Models: filterExcludedModels(intlstaticModels(), req.Host, providerName+"-intl")})
+		log.Printf("model.for_auth %s: %v — persisted snapshot / static fallback", a.UID, err)
+		if snap, ok := persistedSnapshotForStorage(storageJSON, variantIntl); ok {
+			return snap
+		}
+		return intlstaticModels()
 	}
 	// Namespace every dynamic ID with -intl (v0.12.2) and skip auto/work so
 	// the virtual models below are not duplicated.
@@ -283,10 +300,11 @@ func intlhandleModelForAuth(request []byte) ([]byte, error) {
 		pluginapi.ModelInfo{ID: "auto", Name: "auto (server pick)"},
 		pluginapi.ModelInfo{ID: "work", Name: "work (fast mode)"},
 	)
-	// v0.12.62: the intl namespace honors the provider key plus the
-	// "trae-intl" sub-key.
-	out = filterExcludedModels(out, req.Host, providerName+"-intl")
-	return okEnvelope(pluginapi.ModelResponse{Provider: intlproviderName, Models: out})
+	// v0.12.63: stamp the last-known-good catalog into the credential file
+	// (advertised ids, pre exclusion — exclusion re-applies on every serve
+	// branch). Change-guarded inside; best-effort.
+	persistModelSnapshot(storageJSON, variantIntl, out)
+	return out
 }
 
 func intlstaticModels() []pluginapi.ModelInfo {

@@ -96,6 +96,7 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodGet, Path: base + "/intl/accounts", Description: "Trae Intl: list accounts with uid, nickname, and token expiry."},
 			{Method: http.MethodGet, Path: base + "/intl/status", Description: "Trae Intl: plugin status."},
 			{Method: http.MethodPost, Path: base + "/intl/import", Description: "Trae Intl: import credential JSON into host auth store."},
+			{Method: http.MethodGet, Path: base + "/models/groups", Description: "Per-variant model catalog (model_cache snapshots; ?refresh=1 re-discovers) for the panel's exclusion picker."},
 		},
 		// Single menu entry (v0.12.2): /panel covers CN + SOLO + Intl
 		// accounts. Legacy /intl_panel path serves the same panel.
@@ -159,6 +160,9 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, buildPoolStatus()))
 	case req.Method == http.MethodPost && path == base+"/import":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleImportAuth(req)))
+	case req.Method == http.MethodGet && path == base+"/models/groups":
+		status, payload := handleModelGroupsQuery(req)
+		return okEnvelope(mgmtJSONResponse(status, payload))
 	}
 	return okEnvelope(mgmtJSONResponse(http.StatusNotFound, map[string]any{"error": "not found: " + path}))
 }
@@ -1036,6 +1040,11 @@ func handleRefresh() map[string]any {
 // hostAuthSave persists credential JSON via host.auth.save RPC.
 // Used by executor to write back refreshed tokens so they survive CPA restart.
 func hostAuthSave(name string, raw []byte) error {
+	// v0.12.63: typed rebuilds (intlpersistRefreshedAuthTo, import) construct
+	// a fresh document and would silently drop the persisted model_cache
+	// snapshot. Re-inject whitelisted plugin-stamped keys the caller didn't
+	// set but the physical file carries.
+	raw = preservePluginDocKeys(name, raw)
 	// Use pluginapi.HostAuthSaveRequest so JSON field (json.RawMessage) is
 	// embedded raw, NOT base64-encoded (which map[string]any{"json": raw} would do).
 	saveReq := pluginapi.HostAuthSaveRequest{
