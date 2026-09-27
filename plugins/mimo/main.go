@@ -274,6 +274,9 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
 		configure(request)
 		startAdoption()
+		// v0.2.11: 额度/note 保鲜循环（usage.go）——桌面同款 usage/subscription
+		// 面，30 分钟一次把剩余额度写进凭据 note。
+		startUsageNoteLoop()
 		return okEnvelope(mimoRegistration())
 	case pluginabi.MethodModelStatic:
 		return handleModelStatic(request)
@@ -398,7 +401,7 @@ func mimoRegistration() registration {
 // must stay in lockstep with the VERSION file — the same drift class that
 // shipped trae v0.12.86 self-reporting 0.12.56 (repo lesson 2026-09-23).
 // `make build` may still override it via -X (git describe).
-var version = "0.2.10"
+var version = "0.2.11"
 
 // -----------------------------------------------------------------------------
 // Envelope helpers

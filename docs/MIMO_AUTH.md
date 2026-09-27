@@ -279,3 +279,40 @@ sgp→cn 试换，`Set-Cookie` 收到 `serviceToken` 即判 cookie lane 可用�
 **passToken 已死（需桌面重登）** / **响应形态异常（非网络问题，重试/重登无益）**
 ——2026-09-24 真机回归的教训：nonce 裸数字解组失败曾被误报成"网络/边缘原因，
 稍后重试"，把排查引向错误方向（解组失败必须单列）。
+
+---
+
+## 7. 额度面（v0.2.5 起，插件新增调用面）
+
+用户侧额度展示端点（桌面内部 RPC `mimo:getUserUsage` / `mimo:getUserSubscription`
+所打的服务面），2026-09 逆向 + 真机 200 实测确认。插件 v0.2.5 起 30 分钟一次
+拉取并写入凭据 note（CPA/CPAMP 凭据卡片唯一可投递通道），非审计面、非遥测。
+
+### 7.1 端点与线型
+
+- **`GET {base}/user/usage`** →
+  `{"code":0,"data":{"percent":63.4,"resetAt":1790250598,"resetDate":"2026-09-24"},"message":"success"}`
+- **`GET {base}/user/xiaomi/subscription/self`** →
+  `{"code":0,"data":{"current":{bizNo,planCode,title,planTier,status,source,
+  renewalMode,startTime,endTime,nextResetTime,percent},"subscriptions":[…]}}`
+
+`{base}` = 区域表主机 + `/api`（与 chat 同表；bundle 国际版默认 sgp）。
+
+### 7.2 线型语义（bundle `Hie()` 解析器交叉）
+
+1. **`percent` 是"剩余"百分比**——桌面把它当剩余渲染（用户口径修正 2026-09）；
+   bundle 只做非负有限数类型校验，从不解释语义。插件 note 写「余63.4%」。
+2. **`resetDate === null` ⇒ 无有效订阅**——bundle 该状态直接抛
+   "no-data / usage has no active subscription"。插件如实写「无有效订阅」，
+   不拿 percent 兜底渲染。
+3. 认证双 lane 实测皆可：cookie lane（桌面引擎指纹 header 组）与
+   sk lane（`Authorization: Bearer <sk>`）。`/user/available_models` 仅 sk lane
+   可用、`/user/xiaomi/me` 已退役（302），两者均不用于额度链路。
+
+### 7.3 插件行为（usage.go）
+
+- cookie lane 302/401 → 重换票 → 重试一次（与 chat 阶梯同款）；
+- 拉取失败**不动 note**（保上次值，workbuddy syncAuthNote 同款防回退）；
+- note 形制（workbuddy「区域 · 余N」同款）：`SGP · MiMo GL Plus · 余63.4% · 重置09-24`；
+- 幂等写盘：note 无变化不落盘；merge 走 `json.RawMessage` 保其余字段逐字节不变；
+- cn 主机的 usage 面未实测（真机验证只在 sgp 表）——非 200 时保上次 note，不臆测。

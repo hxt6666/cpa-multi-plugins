@@ -137,7 +137,7 @@ NSIS（32 位引导）→ `$PLUGINSDIR/app-64.7z`（nsis7z）→ Electron 应用
 
 | 域名/路径 | 用途 | 认证 |
 |---|---|---|
-| `mimo-server-cn.xiaomimimo.com/api`（+ sgp/ru/in 区域变体） | 桌面会话 lane：`/route/chat/completions`、`/user/xiaomi/me`、图片 `/route/images/generations` | 小米账号 Cookie |
+| `mimo-server-cn.xiaomimimo.com/api`（+ sgp/ru/in 区域变体） | 桌面会话 lane：`/route/chat/completions`、`/user/xiaomi/me`、图片 `/route/images/generations`；额度面（v0.2.5 起，桌面 `getUserUsage`/`getUserSubscription` 同款）：`/user/usage`、`/user/xiaomi/subscription/self`（MIMO_AUTH §7） | 小米账号 Cookie / sk |
 | `api.xiaomimimo.com/v1` | CLI sk lane：OpenAI 兼容聊天（models.dev 注册的 `xiaomi` provider api）、websearch、voice | OAuth 换来的 `sk` key |
 | `platform.xiaomimimo.com` | OAuth 授权（`/authorize`、`/authorize/callback`、`/authorize/code/callback`） | X25519 pk 加密回传 |
 | OAuth 返回的 `url` 字段 | CLI 登录后实际 base_url（随账号/区域下发） | sk |
@@ -161,6 +161,7 @@ NSIS（32 位引导）→ `$PLUGINSDIR/app-64.7z`（nsis7z）→ Electron 应用
 |---|---|---|---|---|
 | 聊天消息 | `mimo-server-*`（Cookie lane）/ `api.xiaomimimo.com`（sk lane） | 必然（核心功能） | **是**（本质） | A/B/C |
 | 登录凭据（Cookie / sk） | 仅小米对应主机 | 必然 | 凭据本身 | A/B/C |
+| 额度查询（凭据自身认证，30 分钟一次） | `mimo-server-*/api/user/usage`、`/api/user/xiaomi/subscription/self` | v0.2.5 起（后台保鲜循环） | 否（无内容，纯剩余百分比/订阅元数据） | 插件 v0.2.5 |
 | model_call/tool_call/agent_request 元数据 | `tracking.miui.com/track/v4/o`（CLI） | **开**（opt-out） | 否（计数/枚举） | B |
 | 同上三类事件 + desktop_performance | 区域 tracking.*.miui.com（OneTrack），**关联小米 UID** | **开**（无同意门） | 否（计数/枚举/时序） | C |
 | 用户输入 text/image/audio + 输出 | `mimo-server-*/api/audit/*` 审核平面 | 随桌面功能 | **是** | C |

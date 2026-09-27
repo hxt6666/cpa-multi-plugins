@@ -353,6 +353,11 @@ func handleParseAuth(raw []byte) ([]byte, error) {
 	// CPA falls back to authIDForPath(path) which derives ID from the file
 	// path and always matches the watcher's key (prevents duplicate records).
 	ad := toAuthData(sa, parseDisabledFromAuthJSON(req.RawJSON))
+	// v0.2.11: surface the on-disk note (the usage loop's quota line) so a
+	// freshly parsed credential renders it in the manager list immediately.
+	if nb := noteFromAuthJSON(req.RawJSON); nb != "" {
+		ad.Metadata["note"] = nb
+	}
 	ad.ID = ""
 	if fn := strings.TrimSpace(req.FileName); fn != "" {
 		ad.FileName = fn
