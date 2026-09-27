@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.9.38
+
+### Persisted per-realm model snapshots — the last-known-good catalog now survives restarts
+
+The management panel's per-credential excluded-models editor
+(accounts → credential card → models → excluded) reads
+`GET /v0/management/auth-files/models`, i.e. the host's LIVE model registry.
+The host unregisters a credential's models whenever its `model.for_auth`
+answer is empty (service.go: `len(models) > 0 … else UnregisterClient`), and
+since v0.9.33 discovery failure advertises exactly that — so every restart
+window (or upstream models outage, or a realm whose discovery never
+succeeded in the process lifetime) left the credential with zero registered
+models and the picker with zero candidates. The in-memory stale fallback
+(v0.12.71) died with the process it lived in.
+
+- **models_persist.go** (new): on every successful discovery the raw list
+  (pre learned-alias overlay) is stamped into the credential's own auth
+  document under a top-level `model_cache` key (`{realm, fetched_at,
+  models}`) via host.auth.save. Unknown top-level keys ride along
+  normalizeWorkbuddyAuthDoc as raw JSON, so the snapshot survives every
+  later save. The write is change-guarded (full ModelInfo compare) because
+  every save re-fires the watcher → model.for_auth — the loop converges
+  after one save per real catalog change.
+- **models.go**: the discovery-failure and empty-payload branches of
+  `fetchDynamicModelsFromStorageInner` now consult the persisted snapshot
+  after the in-memory stale cache: own document first, then the freshest
+  same-realm peer document. Snapshots are strictly per-realm — a CN catalog
+  is never served to an Intl/Global credential (v0.12.18 boundary); the
+  merged cross-realm view emerges at the host registry, which unions every
+  credential's registration. No-token credentials still advertise nothing
+  (v0.9.33 semantics): a credential that cannot chat must not advertise.
+- **models_persist_test.go** (new): snapshot served on discovery failure
+  (fresh-process case), same-realm-only peer fallback, freshest-peer-wins,
+  write-on-change convergence + note preservation, snapshot survival through
+  the write-side normalizer, and the no-token hard stop.
+
+The panel's GLOBAL provider page (oauth-excluded-models) is a separate
+host-side endpoint (`model-definitions/:channel`, an upstream-static catalog
+that only knows eight built-in channels) — plugin channels cannot appear
+there by construction; this change fixes the per-credential editor, which is
+where per-channel exclusion management actually happens for this plugin.
 ## 0.9.37
 
 ### Global: the system message must OPEN the conversation — position, not presence

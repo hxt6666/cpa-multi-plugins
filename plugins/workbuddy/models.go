@@ -161,6 +161,16 @@ func fetchDynamicModelsFromStorageInner(storageJSON []byte) []pluginapi.ModelInf
 		if stale, ok := cachedDynamicModelsStale(realm); ok {
 			return stale
 		}
+		// v0.9.38: the in-memory stale cache died with any restart — the
+		// last-known-good catalog now also lives in the credential files.
+		// Serving it keeps the credential's models registered (the host
+		// UnregisterClients on a 0-model answer), so the panel's
+		// per-credential excluded-models editor never reads an empty
+		// registry after a restart or during an upstream outage.
+		if snap, ok := persistedSnapshotForStorage(storageJSON, realm); ok {
+			noteRealmSource(realm, "persisted snapshot", len(snap))
+			return snap
+		}
 		return nil
 	}
 	if len(dyn) == 0 {
@@ -168,9 +178,19 @@ func fetchDynamicModelsFromStorageInner(storageJSON []byte) []pluginapi.ModelInf
 		if stale, ok := cachedDynamicModelsStale(realm); ok {
 			return stale
 		}
+		// v0.9.38: empty payload ≙ discovery failure — same persisted
+		// fallback before giving up.
+		if snap, ok := persistedSnapshotForStorage(storageJSON, realm); ok {
+			noteRealmSource(realm, "persisted snapshot", len(snap))
+			return snap
+		}
 		return nil
 	}
 	storeDynamicModels(realm, dyn)
+	// v0.9.38: stamp the last-known-good catalog into the credential file
+	// (raw list, pre learned-alias overlay — the overlay re-applies on every
+	// serve branch). Change-guarded inside; best-effort.
+	persistModelSnapshot(storageJSON, realm, dyn)
 	log.Printf("models: realm=%s discovery ok: %d model(s)", realm, len(dyn))
 	return dyn
 }
@@ -236,7 +256,7 @@ func noteRealmError(realm, msg string) {
 		if len(entry.models) > 0 {
 			log.Printf("models: realm=%s discovery failed (%s) — serving last successful discovery (%d model(s)) until next success", realm, msg, len(entry.models))
 		} else {
-			log.Printf("models: realm=%s discovery failed (%s) — nothing cached and static catalogs removed (v0.9.33): advertising nothing until next successful discovery", realm, msg)
+			log.Printf("models: realm=%s discovery failed (%s) — no in-memory catalog (static catalogs removed v0.9.33); persisted credential snapshot (v0.9.38), if any, is consulted before advertising nothing", realm, msg)
 		}
 	}
 }
