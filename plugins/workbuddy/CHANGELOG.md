@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.9.39
+
+### Per-realm oauth-excluded-models sub-keys — channel-scoped global model disable
+
+The management panel's global oauth-excluded-models page manages entries by
+provider key, so "workbuddy" could only exclude models across ALL realms at
+once — per-channel control meant editing every credential card by hand. The
+host passes the WHOLE exclusion map to the plugin (HostConfigSummary), and
+the panel's provider dropdown includes any key already present in the config,
+so the plugin can honor finer keys without any upstream change.
+
+- **models.go**: `filterExcludedModelsForRealm` now applies the credential's
+  realm sub-key on top of the provider key — `workbuddy-cn`,
+  `workbuddy-global`, `workbuddy-intl`, each managing one channel from the
+  same global page. The effective list is the deduplicated union; the bare
+  `workbuddy` key keeps excluding across every realm; empty realm context
+  (model.static) degrades to the provider key. Filtering was refactored into
+  `excludedModelsForKeys` (exact + case-insensitive key scan, union,
+  dedup) + `applyExcludedSet` (fresh-slice filter tail) so the two layers
+  share one implementation.
+- **models_realm_exclusion_test.go** (new): provider-key-only, per-realm
+  sub-key, union dedup, empty-subkey, case-drift tolerance, and
+  cross-realm isolation pins.
+
+Sub-keys appear in the panel's global page dropdown once present in config
+(first entry via config.yaml or one PATCH /v0/management/oauth-excluded-models
+call), then are fully panel-manageable. The page's candidate list for plugin
+channels remains empty by construction (host model-definitions is an
+upstream-static catalog of eight built-in channels) — type or paste model
+ids, or use the per-credential editor whose candidates come from the live
+registry (fixed for workbuddy by the 0.9.38 persisted snapshots).
 ## 0.9.38
 
 ### Persisted per-realm model snapshots — the last-known-good catalog now survives restarts

@@ -1345,28 +1345,60 @@ func filterExcludedModels(models []pluginapi.ModelInfo, host pluginapi.HostConfi
 	if len(host.ExcludedModels) == 0 {
 		return models
 	}
-	// Try exact provider match, then case-insensitive scan.
-	excluded := host.ExcludedModels[providerName]
-	if len(excluded) == 0 {
-		for channel, list := range host.ExcludedModels {
-			if strings.EqualFold(strings.TrimSpace(channel), providerName) {
-				excluded = list
-				break
+	return applyExcludedSet(models, excludedModelsForKeys(host, providerName))
+}
+
+// excludedModelsForKeys resolves the UNION of the oauth-excluded-models
+// lists for keys, each via exact match then a case-insensitive scan (the
+// host lowercases keys before the plugin ever sees them, but hand-written
+// YAML may drift). Deduplicated, lowercased, order-preserving.
+func excludedModelsForKeys(host pluginapi.HostConfigSummary, keys ...string) []string {
+	if len(host.ExcludedModels) == 0 || len(keys) == 0 {
+		return nil
+	}
+	var out []string
+	seen := make(map[string]struct{})
+	for _, key := range keys {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		list := host.ExcludedModels[key]
+		if len(list) == 0 {
+			for channel, l := range host.ExcludedModels {
+				if strings.EqualFold(strings.TrimSpace(channel), key) {
+					list = l
+					break
+				}
 			}
 		}
+		for _, m := range list {
+			id := strings.ToLower(strings.TrimSpace(m))
+			if id == "" {
+				continue
+			}
+			if _, dup := seen[id]; dup {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, id)
+		}
 	}
-	if len(excluded) == 0 {
+	return out
+}
+
+// applyExcludedSet is the shared filter tail. Fresh output slice — never
+// filter in place: models may alias the dynamicModelsCache's own slice
+// (P0: one in-place filter would corrupt the cache for the next fetch).
+// IDs match case-insensitively; patterns are exact ids here — wildcard
+// patterns are the HOST's applyExcludedModels concern.
+func applyExcludedSet(models []pluginapi.ModelInfo, excluded []string) []pluginapi.ModelInfo {
+	if len(excluded) == 0 || len(models) == 0 {
 		return models
 	}
 	excludeSet := make(map[string]struct{}, len(excluded))
 	for _, m := range excluded {
-		excludeSet[strings.ToLower(strings.TrimSpace(m))] = struct{}{}
+		excludeSet[m] = struct{}{}
 	}
-	// Use a fresh slice — models[:0] would alias the input's backing array,
-	// which may be the dynamicModelsCache's own slice. Mutating it in place
-	// would corrupt the cache for subsequent callers (P0 bug: after one
-	// filterExcludedModels call, cache returns the filtered list as the
-	// "full" list on the next fetch).
 	out := make([]pluginapi.ModelInfo, 0, len(models))
 	for _, m := range models {
 		if _, skip := excludeSet[strings.ToLower(m.ID)]; skip {
@@ -1375,6 +1407,21 @@ func filterExcludedModels(models []pluginapi.ModelInfo, host pluginapi.HostConfi
 		out = append(out, m)
 	}
 	return out
+}
+
+// filterExcludedModelsForRealm adds the realm sub-key on top of the
+// provider-key filter (v0.9.39): "workbuddy-cn" / "workbuddy-global" /
+// "workbuddy-intl" manage one channel each from the panel's global
+// oauth-excluded-models page (any key present in config shows up in the
+// page's provider dropdown), while the bare "workbuddy" key keeps excluding
+// across every realm. Empty realm (no credential context) degrades to the
+// provider key alone.
+func filterExcludedModelsForRealm(models []pluginapi.ModelInfo, host pluginapi.HostConfigSummary, realm string) []pluginapi.ModelInfo {
+	realm = strings.ToLower(strings.TrimSpace(realm))
+	if realm == "" {
+		return filterExcludedModels(models, host)
+	}
+	return applyExcludedSet(models, excludedModelsForKeys(host, providerName, providerName+"-"+realm))
 }
 
 // publishUsage reports one upstream attempt into CPAMP request monitoring.
@@ -1407,6 +1454,9 @@ func handleModelForAuth(raw []byte) ([]byte, error) {
 	// auth file carries a non-canonical provider string.
 	cacheModelAliases(req.Host)
 	models := fetchDynamicModelsFromStorage(req.StorageJSON)
-	models = filterExcludedModels(models, req.Host)
+	// v0.9.39: filter at BOTH granularities — the provider key (whole
+	// plugin) and this credential's realm sub-key (channel-scoped).
+	tok, _ := extractAccessToken(req.StorageJSON)
+	models = filterExcludedModelsForRealm(models, req.Host, realmForStorage(req.StorageJSON, tok))
 	return okEnvelope(pluginapi.ModelResponse{Provider: providerName, Models: models})
 }

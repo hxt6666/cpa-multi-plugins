@@ -230,11 +230,12 @@ func intlhandleModelForAuth(request []byte) ([]byte, error) {
 	// Host contract: top-level base64 StorageJSON (see handleModelForAuth,
 	// v0.12.2 fix — the nested "auth" shape never matched the host request).
 	var req struct {
-		StorageJSON  []byte            `json:"StorageJSON"`
-		AuthID       string            `json:"AuthID"`
-		AuthProvider string            `json:"AuthProvider"`
-		Metadata     map[string]any    `json:"Metadata"`
-		Attributes   map[string]string `json:"Attributes"`
+		StorageJSON  []byte                      `json:"StorageJSON"`
+		AuthID       string                      `json:"AuthID"`
+		AuthProvider string                      `json:"AuthProvider"`
+		Metadata     map[string]any              `json:"Metadata"`
+		Attributes   map[string]string           `json:"Attributes"`
+		Host         pluginapi.HostConfigSummary `json:"Host"`
 	}
 	if err := json.Unmarshal(request, &req); err != nil {
 		return nil, err
@@ -242,7 +243,7 @@ func intlhandleModelForAuth(request []byte) ([]byte, error) {
 	a, err := intlparseStoredAuth(req.StorageJSON)
 	if err != nil {
 		log.Printf("intl model.for_auth: parse storage failed (%v) — static fallback", err)
-		return okEnvelope(pluginapi.ModelResponse{Provider: intlproviderName, Models: intlstaticModels()})
+		return okEnvelope(pluginapi.ModelResponse{Provider: intlproviderName, Models: filterExcludedModels(intlstaticModels(), req.Host, providerName+"-intl")})
 	}
 	// v0.12.53: refresh before discovery. The executor path refreshes within
 	// 24h of expiry, but model discovery ran on the raw stored token — an
@@ -260,7 +261,7 @@ func intlhandleModelForAuth(request []byte) ([]byte, error) {
 	dynamic, err := intlupstreamClient.FetchModels(a)
 	if err != nil {
 		log.Printf("model.for_auth %s: %v — falling back to static", a.UID, err)
-		return okEnvelope(pluginapi.ModelResponse{Provider: intlproviderName, Models: intlstaticModels()})
+		return okEnvelope(pluginapi.ModelResponse{Provider: intlproviderName, Models: filterExcludedModels(intlstaticModels(), req.Host, providerName+"-intl")})
 	}
 	// Namespace every dynamic ID with -intl (v0.12.2) and skip auto/work so
 	// the virtual models below are not duplicated.
@@ -282,6 +283,9 @@ func intlhandleModelForAuth(request []byte) ([]byte, error) {
 		pluginapi.ModelInfo{ID: "auto", Name: "auto (server pick)"},
 		pluginapi.ModelInfo{ID: "work", Name: "work (fast mode)"},
 	)
+	// v0.12.62: the intl namespace honors the provider key plus the
+	// "trae-intl" sub-key.
+	out = filterExcludedModels(out, req.Host, providerName+"-intl")
 	return okEnvelope(pluginapi.ModelResponse{Provider: intlproviderName, Models: out})
 }
 

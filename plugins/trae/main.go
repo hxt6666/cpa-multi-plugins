@@ -140,7 +140,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.61"
+var version = "0.12.62"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -530,12 +530,16 @@ func suffixModels(in []pluginapi.ModelInfo, suffix string) []pluginapi.ModelInfo
 	return out
 }
 
-func handleModelStatic(_ []byte) ([]byte, error) {
+func handleModelStatic(raw []byte) ([]byte, error) {
 	// Advertise the UNION of all variant namespaces (used when no accounts
 	// are loaded, and for management UI model pickers). v0.12.79 (issue
 	// #9): cn and solo share the same solo_work_lite catalog, so the CN
 	// namespace is the solo list unsuffixed and the solo namespace the
 	// same list with "-solo"; intl keeps auto/work virtual + "-intl".
+	var req pluginapi.StaticModelRequest
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, err
+	}
 	out := make([]pluginapi.ModelInfo, 0, 24)
 	seen := make(map[string]bool, 24)
 	add := func(ms []pluginapi.ModelInfo) {
@@ -550,6 +554,9 @@ func handleModelStatic(_ []byte) ([]byte, error) {
 	add(staticSoloModels())
 	add(suffixModels(staticSoloModels(), modelSuffixSolo))
 	add(intlstaticModels())
+	// v0.12.62: static advertisement honors the provider key (no credential
+	// context → no variant sub-key).
+	out = filterExcludedModels(out, req.Host)
 	return okEnvelope(pluginapi.ModelResponse{
 		Provider: providerName,
 		Models:   out,
@@ -562,10 +569,11 @@ func handleModelForAuth(request []byte) ([]byte, error) {
 	// NOT nested under "auth" (v0.12.0-0.12.1 parsed the wrong shape, so every
 	// account silently fell back to the same static list; fixed in v0.12.2).
 	var req struct {
-		StorageJSON  []byte            `json:"StorageJSON"`
-		AuthProvider string            `json:"AuthProvider"`
-		Metadata     map[string]any    `json:"Metadata"`
-		Attributes   map[string]string `json:"Attributes"`
+		StorageJSON  []byte                      `json:"StorageJSON"`
+		AuthProvider string                      `json:"AuthProvider"`
+		Metadata     map[string]any              `json:"Metadata"`
+		Attributes   map[string]string           `json:"Attributes"`
+		Host         pluginapi.HostConfigSummary `json:"Host"`
 	}
 	if err := json.Unmarshal(request, &req); err != nil {
 		return nil, err
@@ -580,9 +588,17 @@ func handleModelForAuth(request []byte) ([]byte, error) {
 			Models:   staticUnionModels(),
 		})
 	}
+	// v0.12.62: exclusions at BOTH granularities — the provider key
+	// ("trae", whole plugin) and this credential's variant sub-key
+	// ("trae-cn" / "trae-solo"). Intl credentials route through
+	// intlhandleModelForAuth and use "trae-intl".
+	subKey := providerName + "-cn"
+	if a.Variant == variantSolo {
+		subKey = providerName + "-solo"
+	}
 	return okEnvelope(pluginapi.ModelResponse{
 		Provider: providerName,
-		Models:   modelsForVariant(a),
+		Models:   filterExcludedModels(modelsForVariant(a), req.Host, subKey),
 	})
 }
 
