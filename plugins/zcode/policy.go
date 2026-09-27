@@ -163,9 +163,14 @@ func (e *statusError) Unwrap() error   { return e.err }
 // request-level shapes (413/输入过大 etc.) stay status-less — the host's
 // 1-minute transient default applies.
 func upstreamStatusError(status int, err error) error {
+	// 400 rides along too: the host's isModelSupportResultError maps
+	// 400+"unsupported model"-style bodies to a MODEL-scoped cooldown (never
+	// account damage) and everything else falls to its transient default —
+	// and the client finally sees the real 400 instead of a synthesized 500.
 	if status == http.StatusUnauthorized ||
 		status == http.StatusPaymentRequired ||
-		status == http.StatusTooManyRequests {
+		status == http.StatusTooManyRequests ||
+		status == http.StatusBadRequest {
 		return &statusError{status: status, err: err}
 	}
 	return err

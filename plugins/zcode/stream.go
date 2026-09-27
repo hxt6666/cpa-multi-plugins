@@ -97,7 +97,7 @@ func streamHeaders() http.Header {
 // existing unwrap/clean path; start-plan anthropic events go through the
 // translation state machine (anthropic_sse.go) first, so the host only ever
 // sees OpenAI chunk JSON.
-func pumpUpstreamStream(ctx context.Context, sa *storedAuth, route chatRoute, body string, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID, cooldownModel string) {
+func pumpUpstreamStream(ctx context.Context, sa *storedAuth, route chatRoute, body string, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID, cooldownModel string, startPlaneFallback func(int, string) (chatRoute, string, bool)) {
 	buildReq := func() (*http.Request, error) {
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, route.endpoint, strings.NewReader(body))
 		if err != nil {
@@ -126,21 +126,48 @@ func pumpUpstreamStream(ctx context.Context, sa *storedAuth, route chatRoute, bo
 		streamEmitError(streamID, fmt.Sprintf("http_error: %v", err))
 		return
 	}
-	defer stream.Close()
+	// Nothing has been emitted yet, so a coding-plane no-resource-package
+	// rejection can still retry transparently on the JWT plane (plane.go).
+	// On a swap the deferred Close below binds the RETRY stream — the drained
+	// first stream is closed right before reassignment.
 	if statusCode >= 400 {
 		// Drain the error body via the same bridge so the message is complete.
 		errPayload, _ := io.ReadAll(newHostStreamReader(stream))
 		errBody := string(errPayload)
-		publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, errBody)
-		if authID != "" {
-			recordUpstreamFailure(authID, cooldownModel, statusCode, errBody)
+		swapped := false
+		if startPlaneFallback != nil {
+			if fbRoute, fbBody, ok := startPlaneFallback(statusCode, errBody); ok {
+				if fbStream, fbSC, fbHdrs, fbFailBody, fbOK := tryStartPlaneStream(sa, fbRoute, fbBody); fbOK {
+					stream.Close()
+					stream, statusCode, respHeaders, route = fbStream, fbSC, fbHdrs, fbRoute
+					noteStartPlaneModel(authUID, upstreamModel)
+					swapped = true
+				} else if fbSC > 0 {
+					// Attempted and rejected — the JWT plane's own answer wins.
+					publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, fbSC, fbFailBody)
+					if authID != "" {
+						recordUpstreamFailure(authID, cooldownModel, fbSC, fbFailBody)
+					}
+					streamEmitError(streamID, routeChatError(fbRoute, sa, fbSC, fbHdrs, fbFailBody).Error())
+					stream.Close()
+					return
+				}
+			}
 		}
-		if authUID != "" {
-			go reconcileByUID(authUID, statusCode, errBody)
+		if !swapped {
+			publishUsage(requestedModel, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, errBody)
+			if authID != "" {
+				recordUpstreamFailure(authID, cooldownModel, statusCode, errBody)
+			}
+			if authUID != "" {
+				go reconcileByUID(authUID, statusCode, errBody)
+			}
+			streamEmitError(streamID, routeChatError(route, sa, statusCode, respHeaders, errBody).Error())
+			stream.Close()
+			return
 		}
-		streamEmitError(streamID, routeChatError(route, sa, statusCode, respHeaders, errBody).Error())
-		return
 	}
+	defer stream.Close()
 	collector := &sseUsageCollector{}
 	scanner := bufio.NewScanner(newHostStreamReader(stream))
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
@@ -257,7 +284,7 @@ func pumpUpstreamStream(ctx context.Context, sa *storedAuth, route chatRoute, bo
 // drain the upstream SSE, return the cleaned chunks as a slice. The
 // collector, when non-nil, observes the chunks for usage extraction. The
 // anthropic dialect is translated to OpenAI chunks before collection.
-func collectUpstreamStream(body string, sa *storedAuth, route chatRoute, sseFramed bool, collector *sseUsageCollector) ([]pluginapi.ExecutorStreamChunk, int, error) {
+func collectUpstreamStream(body string, sa *storedAuth, route chatRoute, sseFramed bool, collector *sseUsageCollector, upstreamModel string, startPlaneFallback func(int, string) (chatRoute, string, bool)) ([]pluginapi.ExecutorStreamChunk, int, error) {
 	buildReq := func() (*http.Request, error) {
 		httpReq, err := http.NewRequest(http.MethodPost, route.endpoint, strings.NewReader(body))
 		if err != nil {
@@ -270,11 +297,30 @@ func collectUpstreamStream(body string, sa *storedAuth, route chatRoute, sseFram
 	if err != nil {
 		return nil, 0, fmt.Errorf("http_error: %w", err)
 	}
-	defer stream.Close()
+	// Same entitlement-plane retry window as the pump (nothing emitted yet).
 	if statusCode >= 400 {
 		payload, _ := io.ReadAll(newHostStreamReader(stream))
-		return nil, statusCode, upstreamStatusError(statusCode, routeChatError(route, sa, statusCode, respHeaders, string(payload)))
+		swapped := false
+		if startPlaneFallback != nil {
+			if fbRoute, fbBody, ok := startPlaneFallback(statusCode, string(payload)); ok {
+				if fbStream, fbSC, fbHdrs, fbFailBody, fbOK := tryStartPlaneStream(sa, fbRoute, fbBody); fbOK {
+					stream.Close()
+					stream, statusCode, respHeaders, route = fbStream, fbSC, fbHdrs, fbRoute
+					noteStartPlaneModel(sa.Account.UID, upstreamModel)
+					swapped = true
+				} else if fbSC > 0 {
+					// Attempted and rejected — the JWT plane's own answer wins.
+					stream.Close()
+					return nil, fbSC, upstreamStatusError(fbSC, routeChatError(fbRoute, sa, fbSC, fbHdrs, fbFailBody))
+				}
+			}
+		}
+		if !swapped {
+			stream.Close()
+			return nil, statusCode, upstreamStatusError(statusCode, routeChatError(route, sa, statusCode, respHeaders, string(payload)))
+		}
 	}
+	defer stream.Close()
 	var anthropicState *anthropicSSEState
 	var pendingEvent string
 	if route.anthropic {
@@ -390,6 +436,11 @@ func routeChatError(route chatRoute, sa *storedAuth, status int, headers http.He
 			return fmt.Errorf("start-plan JWT 被网关拒绝 (401)：请重新登录 — %s", truncateRedacted(body, 200))
 		}
 		return startPlanBizError(status, body, captchaHeader)
+	}
+	if isNoResourcePackageError(status, body) {
+		// 1113 family: name the two planes so users can tell "pool does not
+		// cover this model" from "package missing" without reading the wiki.
+		return fmt.Errorf("upstream %d: %s（该凭据在 coding 平面没有覆盖此模型的资源包；若余额页显示有池，多为 zcode.z.ai 活动包（JWT 平面）——插件已自动回退该平面，仍报错说明活动包亦未覆盖此模型或已过期）", status, truncateRedacted(body, 200))
 	}
 	return chatUpstreamError(status, body)
 }

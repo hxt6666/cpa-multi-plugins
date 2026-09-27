@@ -85,9 +85,9 @@ const (
 	// metadata.logo as the plugin icon, same wiring as trae/qoder/workbuddy.
 	pluginLogoURL = "https://raw.githubusercontent.com/TriDefender/zcode-api/master/Android-APP/design/assets/zcode-app-icon.png"
 
-	// LLM upstreams (coding-plan, OpenAI-compatible gateway).
-	openAIBaseZai      = "https://api.z.ai/api/coding/paas/v4"
-	openAIBaseBigmodel = "https://open.bigmodel.cn/api/coding/paas/v4"
+	// LLM upstreams (coding-plan, OpenAI-compatible gateway). Vars (not
+	// consts) so tests can point them at an httptest server — same seam as
+	// startPlanAnthropicEndpoint.
 
 	// loginTTL bounds one CLI login flow. The authorize URL stays valid until
 	// the server-issued expires_at (init response), typically 5 minutes.
@@ -336,7 +336,14 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.1.6"
+var version = "0.1.7"
+
+// coding-plane LLM upstream bases (see the consts block for why these are
+// vars: the e2e fallback tests repoint them at httptest servers).
+var (
+	openAIBaseZai      = "https://api.z.ai/api/coding/paas/v4"
+	openAIBaseBigmodel = "https://open.bigmodel.cn/api/coding/paas/v4"
+)
 
 func wbRegistration() registration {
 	return registration{
@@ -606,7 +613,7 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		defer func() { offPeakSettleBestEffort(sa, currentTicketID) }()
 		route = offPeakRouteFor(sa, ticket.TicketID)
 	} else {
-		route = routeFor(sa)
+		route = routeFor(sa, upstreamModel)
 	}
 	var body string
 	if route.anthropic {
@@ -705,10 +712,35 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 		break
 	}
 	if statusCode >= 400 {
-		publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(payload))
-		recordUpstreamFailure(req.AuthID, cooldownModel, statusCode, string(payload))
-		reconcileAfterExecutorError(req.AuthID, statusCode, string(payload))
-		return nil, upstreamStatusError(statusCode, routeChatError(route, sa, statusCode, respHeaders, string(payload)))
+		// Entitlement-plane fallback (plane.go): a coding-plane
+		// no-resource-package rejection gets exactly one attempt on the
+		// zcode-plan anthropic gateway before the failure is surfaced —
+		// activity/trial buckets (e.g. the weekend glm-5.3-flash grant) live
+		// on the JWT plane, not the coding plane. Success memoizes the model
+		// so later calls pre-route via routeFor. Failure bookkeeping runs
+		// only on the FINAL failure so a recovered request never cools the
+		// credential for the intermediate 1113, and an attempted-but-rejected
+		// fallback surfaces the JWT plane's own answer (more recent, more
+		// specific than the coding-plane 1113).
+		settled := false
+		if fbRoute, fbBody, ok := startPlaneFallbackBody(sa, route, statusCode, string(payload), req.Payload, upstreamModel, false); ok {
+			if fbPayload, fbSC, fbHdrs, fbFailBody, fbDone := tryStartPlaneSend(sa, fbRoute, fbBody); fbDone {
+				noteStartPlaneModel(authUID, upstreamModel)
+				payload, statusCode, respHeaders, route = fbPayload, fbSC, fbHdrs, fbRoute
+				settled = true
+			} else if fbSC > 0 {
+				publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, fbSC, fbFailBody)
+				recordUpstreamFailure(req.AuthID, cooldownModel, fbSC, fbFailBody)
+				reconcileAfterExecutorError(req.AuthID, fbSC, fbFailBody)
+				return nil, upstreamStatusError(fbSC, routeChatError(fbRoute, sa, fbSC, fbHdrs, fbFailBody))
+			}
+		}
+		if !settled {
+			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(payload))
+			recordUpstreamFailure(req.AuthID, cooldownModel, statusCode, string(payload))
+			reconcileAfterExecutorError(req.AuthID, statusCode, string(payload))
+			return nil, upstreamStatusError(statusCode, routeChatError(route, sa, statusCode, respHeaders, string(payload)))
+		}
 	}
 	if route.anthropic {
 		// Anthropic message → OpenAI completion, then the same validation
@@ -762,7 +794,7 @@ func handleExecStream(raw []byte) ([]byte, error) {
 		currentTicketID = ticket.TicketID
 		route = offPeakRouteFor(sa, ticket.TicketID)
 	} else {
-		route = routeFor(sa)
+		route = routeFor(sa, upstreamModel)
 	}
 	bodyRaw := req.Payload
 	if len(bodyRaw) == 0 {
@@ -795,7 +827,10 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	// No async stream id → fall back to synchronous chunk collection.
 	if req.StreamID == "" {
 		collector := &sseUsageCollector{}
-		chunks, statusCode, errCollect := collectUpstreamStream(body, sa, route, sseFramed, collector)
+		startPlaneFallback := func(status int, failBody string) (chatRoute, string, bool) {
+			return startPlaneFallbackBody(sa, route, status, failBody, bodyRaw, upstreamModel, true)
+		}
+		chunks, statusCode, errCollect := collectUpstreamStream(body, sa, route, sseFramed, collector, upstreamModel, startPlaneFallback)
 		if currentTicketID != "" {
 			offPeakSettleBestEffort(sa, currentTicketID)
 		}
@@ -816,7 +851,10 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	// sharedHTTPClient's 120s timeout, holding a pool slot the whole time.
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		pumpUpstreamStream(ctx, sa, route, body, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, cooldownModel)
+		startPlaneFallback := func(status int, failBody string) (chatRoute, string, bool) {
+			return startPlaneFallbackBody(sa, route, status, failBody, bodyRaw, upstreamModel, true)
+		}
+		pumpUpstreamStream(ctx, sa, route, body, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, cooldownModel, startPlaneFallback)
 		// The ticket's round is over on every pump exit path; settle is
 		// idempotent and the server's reaper covers a lost call.
 		if currentTicketID != "" {

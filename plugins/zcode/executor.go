@@ -44,12 +44,13 @@ type chatRoute struct {
 	offPeakTicketID string
 }
 
-// routeFor resolves the chat route for one credential: start-plan accounts
-// ride the zcode.z.ai anthropic gateway with the plan JWT; coding-plan
-// accounts ride the provider's OpenAI-compatible endpoint with the resolved
-// plan key.
-func routeFor(sa *storedAuth) chatRoute {
-	if sa.Auth.Plan == planStart {
+// routeFor resolves the chat route for one credential and model: start-plan
+// accounts (and coding-plan accounts whose requested model is known to carry
+// its entitlement on the JWT plane — plane.go) ride the zcode.z.ai anthropic
+// gateway with the plan JWT; everything else rides the provider's
+// OpenAI-compatible endpoint with the resolved plan key.
+func routeFor(sa *storedAuth, model string) chatRoute {
+	if sa.Auth.Plan == planStart || modelRidesStartPlane(sa, model) {
 		return chatRoute{endpoint: startPlanAnthropicEndpoint, anthropic: true, applyHeaders: applyStartPlanChatHeaders}
 	}
 	return chatRoute{endpoint: chatEndpointFor(sa), applyHeaders: applyChatHeaders}

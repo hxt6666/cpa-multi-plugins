@@ -36,6 +36,11 @@ type zcodeBalance struct {
 	UnitType       string  `json:"unit_type"`
 	UnitTypeAlt    string  `json:"unitType"`
 	ExpiresAt      float64 `json:"expires_at"`
+	// Capabilities carries the bucket's model scope ("model:glm-5.3-flash")
+	// — the entitlement-plane routing input (plane.go). Measured live
+	// 2026-09-27: weekend-activity buckets name exactly the models their
+	// grant covers.
+	Capabilities []string `json:"capabilities"`
 }
 
 func (b zcodeBalance) remaining() float64 {
@@ -108,6 +113,10 @@ func fetchQuotaSnapshot(sa *storedAuth) (*creditsSummary, error) {
 	if out.Code != 0 {
 		return nil, fmt.Errorf("billing balance: code=%d msg=%s", out.Code, out.Msg)
 	}
+	// Entitlement-plane harvest: bucket capabilities feed routeFor's model
+	// routing so JWT-plane packages (activity/trial buckets) pre-route
+	// without waiting for a coding-plane 1113 (plane.go).
+	harvestStartPlaneCapabilities(sa.Account.UID, out.Data.Balances)
 	return summarizeBalances(out.Data.Balances), nil
 }
 
