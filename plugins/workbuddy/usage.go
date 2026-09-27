@@ -45,6 +45,11 @@ func handleUsage(raw []byte) ([]byte, error) {
 	if started.IsZero() {
 		started = time.Now().Add(-record.Latency)
 	}
+	// v0.9.42: local per-credential ledger feeding the credential-card usage
+	// summary in the host's local credential management (note field). Async —
+	// the host's usage pump must never block on note-write RPCs.
+	usageLedgerObserve(record.AuthIndex, record.AuthID, detail.TotalTokens, record.Failed, started)
+	go usageNoteRefreshSoon(record.AuthIndex, record.AuthID)
 	forwardUsageToCPAMP(
 		record.Alias,
 		record.Model,
