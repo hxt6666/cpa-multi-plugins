@@ -411,6 +411,32 @@ func pickCookieValue(cookies []mimoCookie, name string) (string, bool) {
 // fails; a passToken rejection short-circuits the remaining candidates
 // (the account itself must re-login) and is logged redacted.
 func exchangeForCredential(sa *storedAuth) bool {
+	return exchangeWithCandidates(sa, regionCandidates(loadedRegionMode(), sa.Auth.Region))
+}
+
+// exchangeForCredentialWithPreference is exchangeForCredential with an
+// explicit user-stated region preference (paste lane, v0.2.14): the preferred
+// region is tried FIRST. The plain function cannot express this — its
+// currentRegion argument is the SKIP list (a sid that just failed a chat call
+// is not worth re-minting), so a pinned sa.Auth.Region would demote exactly
+// the region the user asked for.
+func exchangeForCredentialWithPreference(sa *storedAuth, prefer string) bool {
+	cands := regionCandidates(loadedRegionMode(), sa.Auth.Region)
+	prefer = strings.ToLower(strings.TrimSpace(prefer))
+	if prefer == "cn" || prefer == "sgp" {
+		out := []string{prefer}
+		for _, r := range cands {
+			if r != prefer {
+				out = append(out, r)
+			}
+		}
+		cands = out
+	}
+	return exchangeWithCandidates(sa, cands)
+}
+
+// exchangeWithCandidates is the shared mint loop behind both entry points.
+func exchangeWithCandidates(sa *storedAuth, candidates []string) bool {
 	if sa == nil || authLaneFor(sa) != laneCookie {
 		return false
 	}
@@ -418,7 +444,7 @@ func exchangeForCredential(sa *storedAuth) bool {
 	if len(bootstrap) == 0 {
 		return false
 	}
-	for _, region := range regionCandidates(loadedRegionMode(), sa.Auth.Region) {
+	for _, region := range candidates {
 		res, err := exchangeServiceToken(bootstrap, regionSID(region))
 		if err != nil {
 			if errors.Is(err, errPassTokenExpired) {

@@ -66,6 +66,20 @@ Linux v10/v11 = AES-128-CBC（PBKDF2 peanuts/saltysalt）。
 豁免续期）。区域 sgp/cn 实测可用，auto 按 sgp→cn 顺序自动绑定；ru/in 的 sid
 未观测到，显式拒绝臆测，请用 `region` 钉死已测区域。
 
+### 引导行粘贴登录（v0.2.14，容器/远程部署）
+
+自动采纳读不到桌面端会话库时（CPA 在 Docker/容器、或与桌面端不同机；Windows DPAPI
+的 jar 也无法在 Linux 容器里解密），插件菜单「Mimo」新增 `/cookie_submit` 资源页：
+从**任意已登录同一小米账号**的浏览器复制账号域引导行
+（`account.xiaomi.com` → DevTools → Application → Cookies → `passToken`/`userId`，
+`cUserId`/`uLocale` 可选），按 `passToken=…; userId=…` 格式粘贴提交——插件走与收养
+完全相同的 `serviceLogin→STS` 换票链现场铸出 serviceToken，凭证保存为
+`mimo-cookie-<uid>.json`（同 uid 重复提交原地覆盖）。页面支持三种粘贴形态：裸
+`Cookie:` 请求头行、分号/换行分隔的 `k=v` 对、`{"passToken":…}` JSON；缺
+passToken/userId 直接拒绝并附格式提示。区域下拉 cn/sgp/auto——显式选择**优先试**
+（`exchangeForCredentialWithPreference`；收养路径的 `currentRegion` 是跳过表语义，
+不能复用）。安全提示：passToken 等同账号登录态，只提交到你自己的 CPA。
+
 ## 隐私边界（硬约束，docs/MIMO_PRIVACY.md §7）
 
 1. **零遥测**：不复刻 OneTrack / tracking.miui.com 任何调用。

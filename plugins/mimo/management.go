@@ -53,6 +53,7 @@ func mimoManagementRegistration() managementRegistrationResponse {
 	return managementRegistrationResponse{
 		Resources: []resourceRoute{
 			{Path: "/oauth_submit", Menu: "Mimo", Description: "MiMo login fallback: paste the full failed redirect URL (http://localhost:…/auth?u=…) here — or GET ?cb_url=<url-encoded> — to finish a login whose localhost redirect never landed (remote/Docker hosts). Shows the live authorize link while a login is pending."},
+			{Path: "/cookie_submit", Menu: "Mimo", Description: "MiMo 桌面会员引导行粘贴登录（v0.2.14，容器/远程部署）：从任意已登录同一小米账号的浏览器复制 passToken/userId（account.xiaomi.com → DevTools → Cookies）粘贴到本页，插件现场走 serviceLogin→STS 换票生成 [COOKIE] 凭据 —— 不需要桌面端与 CPA 同机。"},
 		},
 	}
 }
@@ -67,6 +68,9 @@ func handleMimoManagement(raw []byte) ([]byte, error) {
 	resPrefix := "/v0/resource/plugins/" + providerName
 	if (req.Method == http.MethodGet || req.Method == http.MethodPost) && path == resPrefix+"/oauth_submit" {
 		return okEnvelope(mgmtHTMLResponse(handleMimoOAuthSubmit(req)))
+	}
+	if (req.Method == http.MethodGet || req.Method == http.MethodPost) && path == resPrefix+"/cookie_submit" {
+		return okEnvelope(mgmtHTMLResponse(handleMimoCookieSubmit(req)))
 	}
 	if (req.Method == http.MethodGet || req.Method == http.MethodPost) && path == resPrefix+"/login_gate" {
 		return okEnvelope(mgmtHTMLResponse(handleMimoLoginGate(req)))
