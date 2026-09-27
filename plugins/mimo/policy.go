@@ -57,9 +57,16 @@ func upstreamReadError(err error) error {
 }
 
 // chatUpstreamError renders an upstream chat failure for the client,
-// redacted and bounded.
+// redacted and bounded. A 402 insufficient_balance on the sk lane means
+// the CLI open-platform prepaid ledger ran dry — desktop membership quota
+// is a different identity/ledger (cookie lane), so the copy points at the
+// SSO login path instead of implying the plugin mis-billed (v0.2.13).
 func chatUpstreamError(status int, body string) error {
-	return fmt.Errorf("upstream %d: %s", status, truncateRedacted(body, 200))
+	msg := fmt.Sprintf("upstream %d: %s", status, truncateRedacted(body, 200))
+	if status == http.StatusPaymentRequired && strings.Contains(body, "insufficient_balance") {
+		msg += " —— sk key 走 CLI 开放平台预付费计费，桌面端会员额度不覆盖此通道；桌面会员请在插件面板用「桌面 SSO 登录」生成 [COOKIE] 凭据（CPA 与桌面同机部署时可自动采纳 Chromium 会话），或到开放平台为该 key 充值"
+	}
+	return fmt.Errorf("%s", msg)
 }
 
 // -----------------------------------------------------------------------------
