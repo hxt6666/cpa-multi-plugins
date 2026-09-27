@@ -268,7 +268,11 @@ func syncAuthNote(authIndex, authID string, sa *storedAuth, cr *creditsSummary, 
 		return nil
 	}
 	note := displayNoteWithPrev(sa, cr, disabled, existingNoteCredits(authIndex))
-	if lifecycleStateUnchanged(authID, disabled, note) {
+	// v0.8.28: the change-guard compares the lifecycle-OWNED base only — the
+	// 【用量】 segment churns on its own writer's schedule and must not echo
+	// lifecycle saves.
+	base := usageStripNote(note)
+	if lifecycleStateUnchanged(authID, disabled, base) {
 		return nil
 	}
 	mu := checkinLockFor(authIndex)
@@ -283,8 +287,9 @@ func syncAuthNote(authIndex, authID string, sa *storedAuth, cr *creditsSummary, 
 		// re-read disabled from disk as source of truth
 		disabled = parseDisabledFromAuthJSON(phys.JSON)
 		note = displayNoteWithPrev(sa, cr, disabled, noteCreditsFromJSON(phys.JSON))
+		base = usageStripNote(note)
 	}
-	if lifecycleStateUnchanged(authID, disabled, note) {
+	if lifecycleStateUnchanged(authID, disabled, base) {
 		return nil
 	}
 	raw, err := buildAuthFileJSON(sa, disabled, note, nil)
@@ -294,7 +299,7 @@ func syncAuthNote(authIndex, authID string, sa *storedAuth, cr *creditsSummary, 
 	if err := hostAuthPersistMigrateFn(name, path, legacyPath, raw); err != nil {
 		return err
 	}
-	rememberLifecycleState(authID, disabled, note)
+	rememberLifecycleState(authID, disabled, base)
 	return nil
 }
 

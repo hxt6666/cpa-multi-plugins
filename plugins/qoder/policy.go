@@ -254,6 +254,11 @@ func creditSegmentFromNote(note string) string {
 		if part == "" || part == "CN" || part == "INTL" || part == "已禁用" {
 			continue
 		}
+		// v0.8.28: the 【用量】 segment belongs to the usage-note writer, not
+		// the credits segment — skip it so the two owners never merge.
+		if strings.HasPrefix(part, usageSegmentMarker) {
+			continue
+		}
 		segments = append(segments, part)
 	}
 	seg := strings.Join(segments, " · ")
@@ -299,6 +304,12 @@ func displayNoteWithPrev(sa *storedAuth, cr *creditsSummary, disabled bool, prev
 	note := strings.Join(parts, " · ")
 	if len(note) > 80 {
 		note = note[:77] + "..."
+	}
+	// v0.8.28: re-attach the credential-card usage summary owned by the
+	// usage-note writer (past the base cap — it is information-dense and
+	// updated by its own change-guarded writer).
+	if usage := usageSegmentFromNote(prev); usage != "" {
+		note = note + " · " + usage
 	}
 	return note
 }

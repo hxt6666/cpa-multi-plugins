@@ -134,6 +134,12 @@ func cachedAccountDetails(authID string, sa *storedAuth, force bool) (plan strin
 		// Stamp snapshot time for panel/API consumers (A-09 observability).
 		cr.FetchedAt = now.UTC().Format(time.RFC3339)
 	}
+	// v0.8.28: fold the billing snapshot into the usage ledger (window bounds
+	// from package cycles when present) so the credential-card usage note can
+	// report 标准额度/窗口 without ever making its own upstream calls.
+	if cr != nil {
+		usageQuotaStampFromCredits(authID, plan, cr)
+	}
 	accountCache.Store(authID, &accountCacheEntry{checkin: ci, credits: cr, plan: plan, fetched: now})
 	// Soft cap: if map is huge, drop oldest-looking entries beyond bound.
 	pruneAccountCacheSoftCap(accountCacheSoftCap)
