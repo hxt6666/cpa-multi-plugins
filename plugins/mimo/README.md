@@ -23,8 +23,10 @@ from official sources and documented in
 ## 模型
 
 官方核心表（桌面 bundle 实证）：`mimo-auto` / `mimo-flash` / `mimo-pro`
-（context 1M / output 128k / text+image）。`mimo-auto` 仅在 cookie lane 解析为
-`mimo-pro`（桌面 `EE()/k6()` 对齐）；sk lane 不改写模型。
+（context 1M / output 128k / text+image）。`mimo-auto` 两条 lane 都解析为 `mimo-pro`（桌面 `EE()/k6()` 对齐）；sk lane（公共网关
+`api.xiaomimimo.com/v1`）另将裸别名映射为实测版本化 id（`mimo-pro`→`mimo-v2.6-pro`、
+`mimo-flash`→`mimo-v2.6-flash`，上游 cookie lane 服务端改写输出即真实 id）——公共网关
+拒绝裸别名（400 "Unsupported model"，0.2.12 修复）。
 
 ## 登录（sk lane）
 
