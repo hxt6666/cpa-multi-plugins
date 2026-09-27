@@ -140,7 +140,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.63"
+var version = "0.12.64"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -353,6 +353,13 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 
 	case pluginabi.MethodAuthIdentifier:
 		return okEnvelope(identifierResponse{Identifier: providerName})
+
+	case pluginabi.MethodUsageHandle:
+		// v0.12.64: the UsagePlugin capability was declared from the merge
+		// onward but no dispatch case existed — every usage record died with
+		// unknown_method. Wire it to the local ledger (credential-card usage
+		// summary); trae has no CPAMP forwarding lane.
+		return handleUsageTrae(request)
 
 	case pluginabi.MethodAuthParse:
 		if requestVariantIsIntl(request) {
@@ -662,6 +669,28 @@ func modelsForVariant(a *auth.Auth, storageJSON []byte) []pluginapi.ModelInfo {
 	// every serve branch). Change-guarded inside; best-effort.
 	persistModelSnapshot(storageJSON, a.Variant, out)
 	return out
+}
+
+// handleUsageTrae is the UsagePlugin entry point (v0.12.64): the host calls
+// it after every request with the canonical usage record. Everything lands in
+// the local per-credential ledger that feeds the credential-card usage note;
+// there is no external forwarding lane (unlike workbuddy/qoder's CPAMP).
+func handleUsageTrae(raw []byte) ([]byte, error) {
+	var record pluginapi.UsageRecord
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return nil, err
+	}
+	if record.Provider != "" && record.Provider != providerName {
+		return okEnvelope(map[string]any{"observed": false})
+	}
+	started := record.RequestedAt
+	if started.IsZero() {
+		started = time.Now().Add(-record.Latency)
+	}
+	tokens := record.Detail.TotalTokens
+	usageLedgerObserve(record.AuthIndex, record.AuthID, tokens, record.Failed, started)
+	go usageNoteRefreshSoon(record.AuthIndex, record.AuthID)
+	return okEnvelope(map[string]any{"observed": true})
 }
 
 // staticModel is one fallback-catalog entry: id + display name + context window.

@@ -970,6 +970,11 @@ func handleCreditsQuery(req pluginapi.ManagementRequest) map[string]any {
 			plan:        plan,
 			bind:        bind,
 		})
+		// v0.12.64: fold the pool snapshot into the usage ledger so the
+		// credential-card usage note reports 标准额度 without upstream calls.
+		// trae exposes no reset-window bounds → the note shows the no-window
+		// fallback until one can be parsed.
+		usageQuotaStampFromSummary(f.AuthIndex, sum)
 		if accountPool != nil {
 			// v0.12.40: 不再叠加奖励配置（wallet 变量名保留为历史语义，
 			// 现含义 = 签到奖励数额）。
