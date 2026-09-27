@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.9.40
+
+### Panel model-exclusion picker — check models off a per-realm catalog instead of hand-typing ids
+
+The host's global oauth-excluded-models page cannot offer candidate lists for
+plugin channels (model-definitions/:channel is an upstream-static 8-channel
+catalog; unknown channels 400 "unknown channel"), so excluding a workbuddy
+model meant hand-typing or pasting model ids. This release closes that gap
+entirely inside the plugin: the panel now renders the catalog grouped by
+realm with checkboxes, and writes the SAME host config the other two
+surfaces (global page, per-credential editor) drive.
+
+- **models_groups.go** (new): `GET /plugins/workbuddy/models/groups` serves
+  the per-realm catalog from the newest same-realm model_cache snapshot
+  (v0.9.38) — zero upstream calls on the read path. `?refresh=1` runs one
+  live discovery per realm through fetchDynamicModelsFromStorage's full chain
+  (pin → cache → discover → stale → persisted), the exact path
+  model.for_auth uses, so picker and runtime can never diverge; a successful
+  refresh re-stamps the snapshot. Strict realm boundary (v0.12.18): a
+  snapshot stamped for another realm never satisfies a credential's group.
+- **management.go**: route registered; GET is read-only (plugin-layer auth
+  not required, consistent with accounts/credits).
+- **panel.html**: new "模型禁用（按渠道）" card — CN / Global / Intl groups,
+  checkbox = enabled, un-check + 保存排除 → PATCH
+  /v0/management/oauth-excluded-models {provider: "workbuddy-<realm>",
+  models: [...]}. Excluded models STAY in the list (catalog is
+  pre-exclusion), so un-excluding never needs a lucky upstream round-trip.
+  Models excluded by the bare workbuddy key render locked with a 全局禁用
+  badge — the panel only manages realm sub-keys, avoiding cross-key
+  ambiguity; the global page stays the place for all-realm exclusions.
+  Saving an all-checked group deletes the sub-key (404-guarded), keeping the
+  config free of empty entries.
+
 ## 0.9.39
 
 ### Per-realm oauth-excluded-models sub-keys — channel-scoped global model disable
