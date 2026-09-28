@@ -40,7 +40,9 @@ from official sources and documented in
 AES-256-GCM，key = `SHA256(ECDH(X25519))` → `{sk, uid, url}`。sk 为永久凭据，
 AuthRefresh 仅回显元数据。登录 TTL 6 分钟；**单活策略**：再次点「登录」会关闭旧回环服务器并作废旧会话。
 
-兜底入口：插件菜单「Mimo」（`/v0/resource/plugins/mimo/oauth_submit`，资源路由免管理鉴权；面板经 apiBase 前缀 iframe 渲染，任何部署形态都可达）。v0.2.8 起该页**状态感知**：有进行中的登录时显示冗余授权按钮 + 粘贴框，空闲时显示粘贴指引并每 5 秒自动刷新。直开时也支持 `GET ?cb_url=<完整失败链接>`。粘贴提交后凭证直接保存（v0.2.10），不再依赖登录窗口的轮询——窗口已关也能完成登录。
+兜底入口：插件菜单「Mimo」（`/v0/resource/plugins/mimo/oauth_submit`，资源路由免管理鉴权；面板经 apiBase 前缀 iframe 渲染，任何部署形态都可达）。v0.2.8 起该页**状态感知**：有进行中的登录时显示冗余授权按钮 + 粘贴框，空闲时显示粘贴指引并每 5 秒自动刷新（v0.2.15 起为防误触发刷新：任何输入框有内容时跳过本轮刷新）。直开时也支持 `GET ?cb_url=<完整失败链接>`。粘贴提交后凭证直接保存（v0.2.10），不再依赖登录窗口的轮询——窗口已关也能完成登录。
+
+**单一面板页（v0.2.15）**：原「Mimo」×2 侧边栏入口（`/oauth_submit` 与 `/cookie_submit` 各挂一个 Menu 标签，宿主把每个带标签资源渲染成独立入口）合并为一页——同一页面上下两段：上段 OAuth 重定向链接粘贴兑底，下段桌面会员引导行粘贴登录；`/cookie_submit` 保留为无 Menu 的可路由资源（合并页表单的 POST 目标，旧书签同样可达）。
 
 ## 桌面会话收养（cookie lane）
 
@@ -69,7 +71,8 @@ Linux v10/v11 = AES-128-CBC（PBKDF2 peanuts/saltysalt）。
 ### 引导行粘贴登录（v0.2.14，容器/远程部署）
 
 自动采纳读不到桌面端会话库时（CPA 在 Docker/容器、或与桌面端不同机；Windows DPAPI
-的 jar 也无法在 Linux 容器里解密），插件菜单「Mimo」新增 `/cookie_submit` 资源页：
+的 jar 也无法在 Linux 容器里解密），用插件菜单「Mimo」合并页（v0.2.15 起与 OAuth
+兑底同页，直开 `/cookie_submit` 亦可）：
 从**任意已登录同一小米账号**的浏览器复制账号域引导行
 （`account.xiaomi.com` → DevTools → Application → Cookies → `passToken`/`userId`，
 `cUserId`/`uLocale` 可选），按 `passToken=…; userId=…` 格式粘贴提交——插件走与收养

@@ -11,108 +11,110 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-	"html"
-	"net/http"
-	"net/url"
-	"strings"
-	"time"
+        "encoding/json"
+        "fmt"
+        "html"
+        "net/http"
+        "net/url"
+        "strings"
+        "time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+        "github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 // handleMimoCookieSubmit serves GET/POST /v0/resource/plugins/mimo/cookie_submit.
-// GET renders the guided paste form; POST (urlencoded form: cookies + region)
-// parses the rows, mints the service ticket and persists the credential.
+// POST (urlencoded form: cookies + region) parses the rows, mints the service
+// ticket and persists the credential. GET since v0.2.15 renders the SAME
+// combined page as the menu entry (/oauth_submit) — one "Mimo" surface, both
+// paste lanes; the OAuth section's state-awareness comes along for free.
 func handleMimoCookieSubmit(req pluginapi.ManagementRequest) []byte {
-	if strings.EqualFold(req.Method, http.MethodPost) {
-		return handleMimoCookieSubmitPost(req)
-	}
-	return mimoSubmitPageHead("MiMo 桌面会员 · 引导行粘贴登录", "", mimoCookiePasteFormHTML)
+        if strings.EqualFold(req.Method, http.MethodPost) {
+                return handleMimoCookieSubmitPost(req)
+        }
+        return handleMimoOAuthSubmit(req)
 }
 
 func handleMimoCookieSubmitPost(req pluginapi.ManagementRequest) []byte {
-	vals, err := url.ParseQuery(string(req.Body))
-	if err != nil {
-		return mimoSubmitPage("提交无法解析", "表单数据不是合法的 urlencoded 载荷："+html.EscapeString(err.Error()))
-	}
-	blob := vals.Get("cookies")
-	pinned := normalizePasteRegion(vals.Get("region"))
+        vals, err := url.ParseQuery(string(req.Body))
+        if err != nil {
+                return mimoSubmitPage("提交无法解析", "表单数据不是合法的 urlencoded 载荷："+html.EscapeString(err.Error()))
+        }
+        blob := vals.Get("cookies")
+        pinned := normalizePasteRegion(vals.Get("region"))
 
-	jar := parseBootstrapCookieBlob(blob)
-	if msg := pasteJarMissing(jar); msg != "" {
-		return mimoSubmitPage("提交不完整", msg+"<br>"+mimoCookiePasteFormatHint())
-	}
+        jar := parseBootstrapCookieBlob(blob)
+        if msg := pasteJarMissing(jar); msg != "" {
+                return mimoSubmitPage("提交不完整", msg+"<br>"+mimoCookiePasteFormatHint())
+        }
 
-	uid := userIdFromCookies(jar)
-	if uid == "" {
-		uid = "pasted-" + sha256Sum(cookieFingerprint(jar))
-	}
-	sa := &storedAuth{
-		Auth: mimoTokens{
-			Lane:      laneCookie,
-			UID:       uid,
-			Cookies:   jar,
-			Region:    pinned,
-			Source:    "manual-paste",
-			AdoptedAt: time.Now().Unix(),
-		},
-		Account: mimoAccount{UID: uid},
-	}
-	minted := exchangeForCredentialWithPreference(sa, pinned)
+        uid := userIdFromCookies(jar)
+        if uid == "" {
+                uid = "pasted-" + sha256Sum(cookieFingerprint(jar))
+        }
+        sa := &storedAuth{
+                Auth: mimoTokens{
+                        Lane:      laneCookie,
+                        UID:       uid,
+                        Cookies:   jar,
+                        Region:    pinned,
+                        Source:    "manual-paste",
+                        AdoptedAt: time.Now().Unix(),
+                },
+                Account: mimoAccount{UID: uid},
+        }
+        minted := exchangeForCredentialWithPreference(sa, pinned)
 
-	// Keep the canonical name when the same uid already has a cookie
-	// credential (same policy as the adoption flow's re-adoption).
-	name, _ := resolveAuthFileTarget(sa, nil)
-	if files, err := hostAuthList(); err == nil {
-		for _, f := range files {
-			prev, err := hostAuthGet(f.AuthIndex)
-			if err != nil || prev == nil || authLaneFor(prev) != laneCookie {
-				continue
-			}
-			if sanitizeUIDForFileName(prev.Account.UID) == sanitizeUIDForFileName(uid) {
-				name, _ = resolveAuthFileTarget(prev, nil)
-				break
-			}
-		}
-	}
-	raw, err := buildAuthFileJSON(sa, false, "手动粘贴引导行 · "+time.Now().Format("2006-01-02 15:04"), nil)
-	if err != nil {
-		return mimoSubmitPage("保存失败", "凭证序列化失败："+html.EscapeString(err.Error()))
-	}
-	if err := hostAuthPersistFn(name, raw); err != nil {
-		return mimoSubmitPage("保存失败", "写入宿主凭据库失败："+html.EscapeString(err.Error()))
-	}
+        // Keep the canonical name when the same uid already has a cookie
+        // credential (same policy as the adoption flow's re-adoption).
+        name, _ := resolveAuthFileTarget(sa, nil)
+        if files, err := hostAuthList(); err == nil {
+                for _, f := range files {
+                        prev, err := hostAuthGet(f.AuthIndex)
+                        if err != nil || prev == nil || authLaneFor(prev) != laneCookie {
+                                continue
+                        }
+                        if sanitizeUIDForFileName(prev.Account.UID) == sanitizeUIDForFileName(uid) {
+                                name, _ = resolveAuthFileTarget(prev, nil)
+                                break
+                        }
+                }
+        }
+        raw, err := buildAuthFileJSON(sa, false, "手动粘贴引导行 · "+time.Now().Format("2006-01-02 15:04"), nil)
+        if err != nil {
+                return mimoSubmitPage("保存失败", "凭证序列化失败："+html.EscapeString(err.Error()))
+        }
+        if err := hostAuthPersistFn(name, raw); err != nil {
+                return mimoSubmitPage("保存失败", "写入宿主凭据库失败："+html.EscapeString(err.Error()))
+        }
 
-	summary := fmt.Sprintf("引导行已接收（uid %s，区域偏好 %s）—— 凭证已保存为 <code>%s</code>。",
-		html.EscapeString(uid), html.EscapeString(regionDisplay(pinned)), html.EscapeString(name))
-	if minted {
-		summary += "现场换票成功：serviceToken 已铸入，回到 CPA 刷新凭据列表即可使用；之后运行时会自动续票。"
-	} else {
-		summary += "现场换票未成功：凭证先以 bootstrap-only 形态保存，首次调用会自动重试换票。若之后提示 passToken 被拒，说明该登录态已失效——请在浏览器重新登录 account.xiaomi.com 后重新复制提交。"
-	}
-	return mimoSubmitPage("粘贴登录完成", summary)
+        summary := fmt.Sprintf("引导行已接收（uid %s，区域偏好 %s）—— 凭证已保存为 <code>%s</code>。",
+                html.EscapeString(uid), html.EscapeString(regionDisplay(pinned)), html.EscapeString(name))
+        if minted {
+                summary += "现场换票成功：serviceToken 已铸入，回到 CPA 刷新凭据列表即可使用；之后运行时会自动续票。"
+        } else {
+                summary += "现场换票未成功：凭证先以 bootstrap-only 形态保存，首次调用会自动重试换票。若之后提示 passToken 被拒，说明该登录态已失效——请在浏览器重新登录 account.xiaomi.com 后重新复制提交。"
+        }
+        return mimoSubmitPage("粘贴登录完成", summary)
 }
 
 // normalizePasteRegion whitelists the region pin: cn/sgp pin themselves,
 // everything else (incl. empty/auto) defers to the config region order.
 func normalizePasteRegion(r string) string {
-	switch strings.ToLower(strings.TrimSpace(r)) {
-	case "cn":
-		return "cn"
-	case "sgp":
-		return "sgp"
-	default:
-		return ""
-	}
+        switch strings.ToLower(strings.TrimSpace(r)) {
+        case "cn":
+                return "cn"
+        case "sgp":
+                return "sgp"
+        default:
+                return ""
+        }
 }
 
 func regionDisplay(r string) string {
-	if r == "" {
-		return "auto"
-	}
-	return r
+        if r == "" {
+                return "auto"
+        }
+        return r
 }
 
 // parseBootstrapCookieBlob accepts the shapes a human actually copies:
@@ -125,72 +127,72 @@ func regionDisplay(r string) string {
 // Values keep their literal form — passToken's own `V1:...` colon is part of
 // the value, so splitting happens ONLY on the first `=` of each pair.
 func parseBootstrapCookieBlob(raw string) []mimoCookie {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return nil
-	}
-	if len(s) >= 7 && strings.EqualFold(s[:7], "Cookie:") {
-		s = strings.TrimSpace(s[7:])
-	}
-	s = strings.Trim(s, "\"'`“”‘’")
-	if strings.HasPrefix(s, "{") {
-		var m map[string]any
-		if json.Unmarshal([]byte(s), &m) == nil {
-			jar := make([]mimoCookie, 0, len(m))
-			for _, name := range []string{"passToken", "userId", "cUserId", "uLocale"} {
-				v, ok := m[name]
-				if !ok {
-					continue
-				}
-				if vs := strings.TrimSpace(fmt.Sprintf("%v", v)); vs != "" && vs != "<nil>" {
-					jar = append(jar, newBootstrapRow(name, vs))
-				}
-			}
-			return jar
-		}
-	}
-	jar := make([]mimoCookie, 0, 4)
-	for _, pair := range strings.FieldsFunc(s, func(r rune) bool { return r == ';' || r == '\n' || r == '\r' }) {
-		k, v, ok := strings.Cut(pair, "=")
-		if !ok {
-			continue
-		}
-		k = strings.TrimSpace(k)
-		v = strings.Trim(strings.TrimSpace(v), "\"'")
-		if !bootstrapNames[k] || v == "" {
-			continue
-		}
-		jar = append(jar, newBootstrapRow(k, v))
-	}
-	return jar
+        s := strings.TrimSpace(raw)
+        if s == "" {
+                return nil
+        }
+        if len(s) >= 7 && strings.EqualFold(s[:7], "Cookie:") {
+                s = strings.TrimSpace(s[7:])
+        }
+        s = strings.Trim(s, "\"'`“”‘’")
+        if strings.HasPrefix(s, "{") {
+                var m map[string]any
+                if json.Unmarshal([]byte(s), &m) == nil {
+                        jar := make([]mimoCookie, 0, len(m))
+                        for _, name := range []string{"passToken", "userId", "cUserId", "uLocale"} {
+                                v, ok := m[name]
+                                if !ok {
+                                        continue
+                                }
+                                if vs := strings.TrimSpace(fmt.Sprintf("%v", v)); vs != "" && vs != "<nil>" {
+                                        jar = append(jar, newBootstrapRow(name, vs))
+                                }
+                        }
+                        return jar
+                }
+        }
+        jar := make([]mimoCookie, 0, 4)
+        for _, pair := range strings.FieldsFunc(s, func(r rune) bool { return r == ';' || r == '\n' || r == '\r' }) {
+                k, v, ok := strings.Cut(pair, "=")
+                if !ok {
+                        continue
+                }
+                k = strings.TrimSpace(k)
+                v = strings.Trim(strings.TrimSpace(v), "\"'")
+                if !bootstrapNames[k] || v == "" {
+                        continue
+                }
+                jar = append(jar, newBootstrapRow(k, v))
+        }
+        return jar
 }
 
 func newBootstrapRow(name, value string) mimoCookie {
-	return mimoCookie{Name: name, Value: value, Domain: ".account.xiaomi.com", Path: "/", Secure: true, HTTPOnly: true}
+        return mimoCookie{Name: name, Value: value, Domain: ".account.xiaomi.com", Path: "/", Secure: true, HTTPOnly: true}
 }
 
 // pasteJarMissing names the required rows a paste must carry: the exchange's
 // P1 consumes passToken+userId at minimum; cUserId/uLocale stay optional
 // (the measured working request had all four, but passport accepts fewer).
 func pasteJarMissing(jar []mimoCookie) string {
-	has := func(name string) bool {
-		for _, c := range jar {
-			if c.Name == name {
-				return true
-			}
-		}
-		return false
-	}
-	var missing []string
-	for _, name := range []string{"passToken", "userId"} {
-		if !has(name) {
-			missing = append(missing, "<code>"+name+"</code>")
-		}
-	}
-	if len(missing) == 0 {
-		return ""
-	}
-	return "缺少必需行：" + strings.Join(missing, "、") + "（cUserId / uLocale 可选）。"
+        has := func(name string) bool {
+                for _, c := range jar {
+                        if c.Name == name {
+                                return true
+                        }
+                }
+                return false
+        }
+        var missing []string
+        for _, name := range []string{"passToken", "userId"} {
+                if !has(name) {
+                        missing = append(missing, "<code>"+name+"</code>")
+                }
+        }
+        if len(missing) == 0 {
+                return ""
+        }
+        return "缺少必需行：" + strings.Join(missing, "、") + "（cUserId / uLocale 可选）。"
 }
 
 const mimoCookiePasteFormHTML = `<p><b>适用场景</b>：CPA 部署在 Docker/容器或与 MiMo 桌面端不同机，插件自动采纳读不到桌面端的会话库；换票本身不需要桌面端——只需要账号域的引导行。从<b>任意已登录同一小米账号</b>的浏览器获取即可。</p>
@@ -214,5 +216,5 @@ const mimoCookiePasteFormHTML = `<p><b>适用场景</b>：CPA 部署在 Docker/�
 <p style="color:#8a6d3b;background:#fcf8e3;padding:8px;border-radius:6px">⚠ passToken 等同账号登录态：只提交到你自己的 CPA，提交后不要转发明文。</p>`
 
 func mimoCookiePasteFormatHint() string {
-	return `格式：<code>passToken=值; userId=值</code>（分号或换行分隔均可，也可粘贴 <code>{"passToken":"…","userId":"…"}</code> JSON）。`
+        return `格式：<code>passToken=值; userId=值</code>（分号或换行分隔均可，也可粘贴 <code>{"passToken":"…","userId":"…"}</code> JSON）。`
 }

@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.9.44
+
+### Login success now carries its own persistence guarantee
+
+Follow-up to the 0.9.43 invisible-credential fix. Two residual weaknesses
+remained in the login chain, both closed here.
+
+**Plugin-side persist before success.** The 0.9.43 fix made the poll fail
+loudly when no uid survives, and aligned the panel's family filter with the
+claim predicate — but the actual FILE WRITE still belonged exclusively to
+the host's post-poll save, which rides the login dialog's lifecycle. mimo
+hit the identical failure class (v0.2.10: "登录完成" shown while the
+credential never landed, because the UI-driven poll loop died with the
+dialog). `handlePollLogin` now persists the credential plugin-side via
+`host.auth.save` (canonical `authFileNameFor` name, full attribution
+stamps through `buildAuthFileJSON`) BEFORE returning success. Best-effort
+and non-fatal: the host's own save stays primary and converges on the same
+file name (same record key — no duplicate), so a bridge hiccup costs only
+the redundancy, never the login. "Poll success" now implies "credential
+file exists and every listing surface shows it".
+
+**AuthData.FileName rides the file-layer rule.** `toAuthDataOptsWithNote`
+hard-coded `"workbuddy-" + uid + ".json"`, defeating `authFileNameFor`'s
+region-qualification for Intl accounts: an Intl login and a CN/Global
+login sharing one uid both landed on the same file, the second login
+silently overwriting the first — exactly the collision the file layer's
+`workbuddy-intl-<uid>.json` rule was written to prevent. AuthData now
+derives its FileName from `authFileNameFor`, so the poll-save, the
+plugin-side login persist, adoption, import and reconcile all agree on ONE
+canonical name per credential. (The AuthParse echo path is unaffected —
+it echoes the host-provided FileName back.)
+
+Tests: canonical-name persistence for CN and Intl (same uid, two files),
+attribution stamps present, bridge-failure swallow, and the
+AuthData-vs-file-layer naming table (cn / intl / empty-uid / nil).
+
 ## 0.9.43
 
 ### Login can no longer mint an invisible credential — the UID-less workbuddy.json ghost
