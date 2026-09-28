@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.9.43
+
+### Login can no longer mint an invisible credential — the UID-less workbuddy.json ghost
+
+Field report against v0.12.98 (2026-09-28): a NEW workbuddy OAuth account
+finished the upstream login page, the CPA UI reported success, yet no
+credential card ever appeared in the panel — while the CPA management UI
+simultaneously listed non-credential usage snapshots (`.trae-usage.json`,
+`workbuddy-usage.json`, written by the external manager into the auth dir)
+as "unrecognized credentials". Two defects, one visible symptom.
+
+**Root cause (the invisible credential).** `handlePollLogin` fetched the
+login/account payload and IGNORED every failure: a transport error, a 4xx
+from the openresty gateway race documented right in the comment, or a
+response-shape change all silently produced an empty account. An empty
+`account.uid` then made `toAuthDataOptsWithNote` fall back to the legacy
+single-account filename `workbuddy.json` — and the host saved the new
+credential under exactly that name. The login chain looked successful (the
+file existed; parse even claimed it), but the panel's family filter only
+accepted prefixed names (`workbuddy-`, `codebuddy-cn-`, `codebuddy-intl-`),
+so the row was permanently invisible — and the lifecycle legacy-name
+migration never ran either, because it only sees files the same filter
+returns. Success everywhere, credential nowhere.
+
+Fix, three layers:
+
+- `oauth.go` — the account fetch is now `fetchLoginAccount`: a retry ladder
+  (two backoff steps, sized for the openresty race), tolerant payload
+  parsing (flat / numeric-uid / nested `user`|`account`|`info`|`profile`
+  shapes), and a last-resort JWT-claims identity fallback (`uid`, `user_id`,
+  `userId`, `sub` — URI/email-shaped subs rejected). If no uid survives all
+  three layers, the poll FAILS with an explicit error instead of returning
+  a success that mints an unnamed credential. The CPA UI now shows the real
+  cause ("upstream account endpoint returned no uid after retries") rather
+  than a phantom success.
+- `host_auth.go` — `hostAuthList` accepts names via `isOurFamilyFileName`,
+  the SAME predicate `handleParseAuth` claims files with. The prefix list
+  and the claim predicate can never drift apart again; a credential under
+  the legacy bare name is listed (and lifecycle's
+  `resolveAuthFileTarget` migration can finally see and rewrite it) instead
+  of being orphaned.
+- Net effect: either the login produces a properly named, panel-visible
+  `workbuddy-<uid>.json`, or it fails loudly. No third state.
+
+**The usage snapshots.** `.trae-usage.json` / `workbuddy-usage.json` are
+written by the external manager (CPA-Manager-Plus usage import) into the
+auth dir — no plugin writes them (zero source and history hits). The host
+lists every `*.json` in that dir, so type-less snapshots surface as
+"unrecognized credentials" in the CPA UI. They are display noise, not
+credentials; the plugins never claim them (workbuddy's parse rejects the
+payload, and the dot-prefixed name matches no family filter). Delete or
+ignore them; the durable fix belongs to whichever tool places them there.
+
+
 ## 0.9.41
 
 ### Save-funnel preservation — the typed lifecycle rebuilds no longer wipe the persisted model snapshot

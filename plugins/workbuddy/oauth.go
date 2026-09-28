@@ -6,6 +6,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -188,21 +189,27 @@ func handlePollLogin(raw []byte) ([]byte, error) {
 		})
 	}
 
-	var acct accountData
-	acctHeaders := func(r *http.Request) {
-		loginHeaders(r)
-		r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	acct, acctErr := fetchLoginAccount(lc.client, lc.region, state, tok.AccessToken)
+	if strings.TrimSpace(acct.UID) == "" {
+		// Identity fallback: pull the uid out of the access token's JWT
+		// claims when the account endpoint stayed empty after the retry
+		// ladder (upstream outage or response-shape change).
+		acct.UID = uidFromTokenClaims(tok.AccessToken)
 	}
-	acctBase := endpointLoginAcct
-	if lc.region == regionIntl {
-		acctBase = upstreamBaseForRegion(lc.region) + "/v2/plugin/login/account?state="
-		acctHeaders = func(r *http.Request) {
-			loginHeadersFor(r, lc.region)
-			r.Header.Set("Authorization", "Bearer "+tok.AccessToken)
+	if strings.TrimSpace(acct.UID) == "" {
+		// v0.9.43: never mint a UID-less credential. The old behavior
+		// silently continued with an empty account, which made
+		// toAuthDataOptsWithNote fall back to the legacy single-account
+		// filename workbuddy.json — a name the panel's family filter
+		// does not list. The login looked successful on both the
+		// upstream page AND the CPA UI (the host had saved the file),
+		// yet no credential card ever appeared. Failing the poll
+		// surfaces the real cause in the CPA UI instead.
+		loginStates.Delete(state)
+		if acctErr == nil {
+			acctErr = fmt.Errorf("account payload carried no uid")
 		}
-	}
-	if acctRaw, _, errAcct := doJSON(lc.client, http.MethodGet, acctBase+state, acctHeaders, nil); errAcct == nil {
-		_ = json.Unmarshal(acctRaw, &acct)
+		return nil, fmt.Errorf("login: upstream account endpoint returned no uid after retries (%v) — credential withheld; please retry login", acctErr)
 	}
 
 	sa := &storedAuth{
@@ -232,6 +239,160 @@ func handlePollLogin(raw []byte) ([]byte, error) {
 		Status: pluginapi.AuthLoginStatusSuccess,
 		Auth:   toAuthData(sa),
 	})
+}
+
+// loginAcctRetryDelays bounds the in-poll retry ladder for the account
+// fetch. Documented upstream race (see handlePollLogin): login/account sits
+// behind the openresty gateway and is rejected (401) for a short moment
+// right after auth/token succeeds. Var so tests can collapse the wait.
+var loginAcctRetryDelays = []time.Duration{400 * time.Millisecond, 800 * time.Millisecond}
+
+// fetchLoginAccount fetches the login/account payload for a completed token
+// exchange, retrying transient failures. An empty-UID payload counts as a
+// failure — the caller decides whether to fall back or fail the login.
+func fetchLoginAccount(client *http.Client, region, state, accessToken string) (accountData, error) {
+	acctBase := endpointLoginAcct
+	if region == regionIntl {
+		acctBase = upstreamBaseForRegion(region) + "/v2/plugin/login/account?state="
+	}
+	return fetchLoginAccountAt(client, acctBase, region, state, accessToken)
+}
+
+// fetchLoginAccountAt is fetchLoginAccount against an explicit base URL
+// (test seam: endpointLoginAcct is a package const).
+func fetchLoginAccountAt(client *http.Client, acctBase, region, state, accessToken string) (accountData, error) {
+	headers := func(r *http.Request) {
+		loginHeaders(r)
+		r.Header.Set("Authorization", "Bearer "+accessToken)
+	}
+	if region == regionIntl {
+		headers = func(r *http.Request) {
+			loginHeadersFor(r, region)
+			r.Header.Set("Authorization", "Bearer "+accessToken)
+		}
+	}
+	var acct accountData
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			if attempt > len(loginAcctRetryDelays) {
+				return acct, lastErr
+			}
+			time.Sleep(loginAcctRetryDelays[attempt-1])
+		}
+		acctRaw, status, err := doJSON(client, http.MethodGet, acctBase+state, headers, nil)
+		if err == nil {
+			if parsed, ok := parseLoginAccount(acctRaw); ok {
+				return parsed, nil
+			}
+			lastErr = fmt.Errorf("http %d: payload carried no uid", status)
+			continue
+		}
+		lastErr = err
+	}
+}
+
+// parseLoginAccount tolerates the account payload shapes seen across realms
+// and gateway versions: flat {"uid":...}, numeric uid, and nested
+// {"user":{...}} / {"account":{...}} wrappers. Previously a shape change
+// silently produced an empty account (and via the bare-filename fallback, an
+// invisible credential).
+func parseLoginAccount(raw json.RawMessage) (accountData, bool) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return accountData{}, false
+	}
+	var flat map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &flat); err != nil {
+		return accountData{}, false
+	}
+	if acct, ok := accountDataFromMap(flat); ok {
+		return acct, true
+	}
+	for _, key := range []string{"user", "account", "info", "profile"} {
+		nested, exists := flat[key]
+		if !exists {
+			continue
+		}
+		var inner map[string]json.RawMessage
+		if err := json.Unmarshal(nested, &inner); err != nil {
+			continue
+		}
+		if acct, ok := accountDataFromMap(inner); ok {
+			return acct, true
+		}
+	}
+	return accountData{}, false
+}
+
+// accountDataFromMap extracts accountData tolerating string or numeric uid.
+func accountDataFromMap(m map[string]json.RawMessage) (accountData, bool) {
+	var acct accountData
+	uid, ok := jsonStringish(m["uid"])
+	if !ok || strings.TrimSpace(uid) == "" {
+		return accountData{}, false
+	}
+	acct.UID = uid
+	if v, ok := jsonStringish(m["enterpriseId"]); ok {
+		acct.EnterpriseID = v
+	}
+	if v, ok := jsonStringish(m["nickname"]); ok {
+		acct.Nickname = v
+	}
+	return acct, true
+}
+
+// jsonStringish decodes a JSON value that may be a string or a number into
+// a string. Upstream gateways have been observed flipping uid between both.
+func jsonStringish(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s, true
+	}
+	var n json.Number
+	if err := json.Unmarshal(raw, &n); err == nil {
+		return n.String(), true
+	}
+	return "", false
+}
+
+// uidFromTokenClaims is the last-resort identity fallback: decode the access
+// token's JWT payload and return the first claim that looks like an account
+// id. Returns "" when the token is not a JWT carrying any recognizable
+// claim. Standard `sub` values that are URIs or emails are skipped — they
+// are subject identifiers, not CodeBuddy account ids.
+func uidFromTokenClaims(accessToken string) string {
+	parts := strings.Split(strings.TrimSpace(accessToken), ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	payload := parts[1]
+	if pad := len(payload) % 4; pad != 0 {
+		payload += strings.Repeat("=", 4-pad)
+	}
+	raw, err := base64.URLEncoding.DecodeString(payload)
+	if err != nil {
+		return ""
+	}
+	var claims map[string]json.RawMessage
+	if json.Unmarshal(raw, &claims) != nil {
+		return ""
+	}
+	for _, key := range []string{"uid", "user_id", "userId", "sub"} {
+		v, ok := jsonStringish(claims[key])
+		if !ok {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		if v == "" || strings.Contains(v, "://") || strings.Contains(v, "@") || strings.Contains(v, " ") {
+			continue
+		}
+		return v
+	}
+	return ""
 }
 
 func handleRefreshAuth(raw []byte) ([]byte, error) {

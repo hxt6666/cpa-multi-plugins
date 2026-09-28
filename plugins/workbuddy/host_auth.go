@@ -25,7 +25,7 @@ type rpcHostAuthGetResponse struct {
 	JSON      json.RawMessage `json:"json"`
 }
 
-// hostAuthList returns all workbuddy credentials known to the host.
+// hostAuthList returns all workbuddy-family credentials known to the host.
 func hostAuthList() ([]pluginapi.HostAuthFileEntry, error) {
 	raw, err := hostCall(pluginabi.MethodHostAuthList, nil)
 	if err != nil {
@@ -43,27 +43,25 @@ func hostAuthList() ([]pluginapi.HostAuthFileEntry, error) {
 	// array (P1-3: fragile pattern, safe today but could break if resp is
 	// ever cached/reused).
 	//
-	// Filter by filename prefix, NOT by Type/Provider: many existing auth
-	// files on disk don't carry a "type"/"provider" field (they were written
-	// before that convention), and EqualFold("", providerName) returns false
-	// for them — meaning we'd incorrectly exclude files that have the
-	// workbuddy- prefix but no type field. Filename prefix is the only
-	// reliable cross-version discriminator.
+	// Filter by FILE NAME, NOT by Type/Provider: many existing auth files
+	// on disk don't carry a "type"/"provider" field (they were written
+	// before that convention), and EqualFold("", providerName) returns
+	// false for them — meaning we'd incorrectly exclude files that have
+	// a workbuddy-family name but no type field. The filename is the only
+	// reliable cross-version discriminator for type-less files.
+	//
+	// v0.9.43: the accepted-name set is now isOurFamilyFileName — the
+	// SAME predicate handleParseAuth uses to claim files. The previous
+	// inline prefix list (workbuddy- / codebuddy-cn- / codebuddy-intl-)
+	// missed the legacy single-account names (workbuddy.json /
+	// codebuddy.json), so a credential saved under a legacy name — the
+	// UID-less-login fallback — was claimed by parse yet permanently
+	// INVISIBLE here: the panel showed "no credential" while the file
+	// existed on disk, and the lifecycle legacy-name migration never ran
+	// either (it only sees files this list returns).
 	out := make([]pluginapi.HostAuthFileEntry, 0, len(resp.Files))
-	// Accept both the canonical workbuddy- prefix and legacy codebuddy-cn-
-	// files (merged plugin). adoptForeignAuths rewrites the latter to the
-	// canonical name; until then they still participate in reconcile.
-	prefixes := []string{providerName + "-", "codebuddy-cn-", "codebuddy-intl-"}
 	for _, f := range resp.Files {
-		lower := strings.ToLower(f.Name)
-		matched := false
-		for _, prefix := range prefixes {
-			if strings.HasPrefix(lower, prefix) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
+		if !isOurFamilyFileName(f.Name) {
 			continue
 		}
 		// Content guard: a file can carry our filename prefix while its body
