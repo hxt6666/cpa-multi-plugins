@@ -180,8 +180,13 @@ func hostAuthSaveJSON(name string, raw []byte) error {
 	// import) construct a fresh document and would silently drop the
 	// persisted model_cache snapshot (v0.9.38) — every credits-note churn
 	// wiped it, and the next discovery outage advertised the static-less
-	// nothing. Re-inject whitelisted plugin-stamped keys the caller didn't
-	// set but the physical file carries.
+	// nothing. Re-inject whitelisted keys the caller didn't set but the
+	// physical file carries.
+	//
+	// v0.9.45 (issue #25): the whitelist now also covers host-owned
+	// operator fields (proxy_url / weight / priority / prefix / label /
+	// request_retry / headers) that CPA's auth manager writes into the
+	// file — every plugin-side rewrite used to reset them to defaults.
 	raw = preservePluginDocKeys(name, raw)
 	saveReq := pluginapi.HostAuthSaveRequest{
 		Name: name,

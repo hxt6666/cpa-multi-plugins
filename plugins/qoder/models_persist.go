@@ -40,14 +40,27 @@ import (
 // top-level keys as raw JSON (never re-marshaled through a typed struct).
 const modelCacheDocKey = "model_cache"
 
-// preservedPluginDocKeys lists plugin-stamped top-level credential keys that
-// must survive EVERY save funnel — including the typed buildAuthFileJSON
-// rebuilds used by the lifecycle/notes paths, which construct a fresh
-// document from a struct and would otherwise silently drop them. The
-// whitelist (not a blanket merge) is deliberate: a rebuild that renames or
-// re-imports a credential must not smuggle arbitrary stale keys from a
-// same-named older file.
-var preservedPluginDocKeys = []string{modelCacheDocKey}
+// preservedPluginDocKeys lists top-level credential keys that must survive
+// EVERY save funnel — including the typed buildAuthFileJSON rebuilds used by
+// the lifecycle/notes paths, which construct a fresh document from a struct
+// and would otherwise silently drop them. The whitelist (not a blanket
+// merge) is deliberate: a rebuild that renames or re-imports a credential
+// must not smuggle arbitrary stale keys from a same-named older file.
+//
+// v0.8.29 (issue #25): beyond the plugin-stamped model_cache, the list now
+// carries the host-owned operator fields CPA writes into auth files via the
+// auth manager (proxy_url / weight / priority / prefix / label / request_retry
+// / headers). Every plugin-side note churn used to reset them to defaults.
+var preservedPluginDocKeys = []string{
+	modelCacheDocKey,
+	"proxy_url",
+	"weight",
+	"priority",
+	"prefix",
+	"label",
+	"request_retry",
+	"headers",
+}
 
 // persistedModelCache is the on-disk snapshot shape.
 type persistedModelCache struct {

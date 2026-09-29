@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +34,13 @@ var (
 )
 
 // startAdoption kicks the background migration (register/reconfigure safe).
+//
+// v0.12.68 (issue #22 mirror): during plugin registration the host auth
+// manager may not be wired yet — host.auth.list succeeds via its directory
+// fallback but host.auth.get answers "bad envelope" for entries the manager
+// has not indexed, and adoption silently never ran. Retry until the
+// manager-backed view is available; the direct-by-path fallback inside
+// adoptForeignAuths makes each attempt independent of manager readiness.
 func startAdoption() {
 	go func() {
 		adoptMu.Lock()
@@ -41,7 +50,15 @@ func startAdoption() {
 		}
 		lastAdoptRun = time.Now()
 		adoptMu.Unlock()
-		adoptForeignAuths()
+		for attempt := 0; attempt < 10; attempt++ {
+			if attempt > 0 {
+				time.Sleep(2 * time.Second)
+			}
+			if adoptForeignAuths() {
+				return
+			}
+		}
+		log.Printf("adopt: host auth manager did not become ready; will retry on next reload")
 	}()
 }
 
@@ -59,22 +76,35 @@ func legacyTraeVariant(name string) string {
 	return ""
 }
 
-// adoptForeignAuths rewrites every legacy trae auth file in place.
-func adoptForeignAuths() {
+// adoptForeignAuths rewrites every legacy trae auth file in place. Returns
+// true when every legacy candidate was resolvable (or none exist), false
+// when the host still needs time to publish auth indexes (caller retries).
+func adoptForeignAuths() bool {
 	files, err := hostAuthList()
 	if err != nil {
 		log.Printf("adopt: host auth list failed: %v", err)
-		return
+		return false
 	}
 	adopted := 0
+	waitingForHost := false
 	for _, f := range files {
 		variant := legacyTraeVariant(f.Name)
 		if variant == "" {
 			continue
 		}
 		raw, err := hostAuthGetRaw(f.AuthIndex)
-		if err != nil {
+		if err != nil || len(raw) == 0 {
+			// Manager not ready (bad envelope / empty index): the list entry
+			// carries the backing path — read the physical file directly
+			// (issue #22 mirror).
+			if diskRaw := readPhysicalByPath(f.Path); len(diskRaw) > 0 {
+				raw = json.RawMessage(diskRaw)
+				err = nil
+			}
+		}
+		if err != nil || len(raw) == 0 {
 			log.Printf("adopt %s: get failed: %v", f.Name, err)
+			waitingForHost = true
 			continue
 		}
 		var probe struct {
@@ -116,6 +146,26 @@ func adoptForeignAuths() {
 	if adopted > 0 {
 		log.Printf("adopt: done — migrated %d legacy trae auth file(s)", adopted)
 	}
+	return !waitingForHost
+}
+
+// readPhysicalByPath reads the credential document straight from the
+// host.auth.list entry's backing path. Best-effort: empty path or unreadable
+// file returns nil so the caller's retry ladder takes over.
+func readPhysicalByPath(path string) []byte {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil
+	}
+	raw, err := os.ReadFile(abs)
+	if err != nil || len(raw) == 0 {
+		return nil
+	}
+	return raw
 }
 
 // hostAuthGetRaw fetches one credential's raw JSON from the host auth

@@ -6,6 +6,7 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -68,13 +69,21 @@ const defaultUsageReportURL = "http://127.0.0.1:18317/v0/management/usage/import
 const fallbackUsageReportURL = "http://cpa-manager-plus:18317/v0/management/usage/import"
 
 // configure decodes plugin config from the lifecycle request.
+// v0.8.29 (issue #24): login_region is STICKY — it only changes when the
+// incoming config explicitly carries the key (same semantics trae shipped in
+// v0.12.3). The host may resend Register/Reconfigure with a bare or foreign
+// config block (e.g. during auth-store churn); resetting to cn on those made
+// intl logins flip regions mid-flight. Values are read from a real YAML
+// decode first (yaml.v3 rides in via the SDK), so flow-style one-liners
+// (`trae: {enabled: true, login_region: intl}`) and JSON payloads parse too;
+// the historical line-scan stays as the fallback for malformed YAML.
 func configure(raw []byte) {
 	// Parse config without holding any lock (fixes nested-lock hazard).
 	nextCheckinAuto := true
 	nextLifecycleAuto := true
 	nextSchedulerMode := schedulerModeOff // reset to default on reconfigure
 	nextKeepaliveAuto := true
-	nextLoginRegion := regionCN // reset to default on reconfigure (like scheduler_mode)
+	nextLoginRegion := "" // sticky: empty = keep current (issue #24)
 	nextMgmtKey := ""
 	nextStreamHeadTimeout := 0
 
@@ -84,6 +93,43 @@ func configure(raw []byte) {
 			ConfigYAML []byte `json:"config_yaml"`
 		}
 		if err := json.Unmarshal(raw, &req); err == nil {
+			// v0.8.29 (issue #24): decode the payload as real YAML
+			// first — yaml.v3 already rides in via the SDK, and this
+			// sees flow-style one-liners and JSON that the line-scan
+			// below can never match. Line-scan results stay
+			// authoritative for block style (both agree there); the
+			// map only ADDS keys the scan cannot see.
+			if m, ok := decodePluginConfigYAML(req.ConfigYAML); ok {
+				if v, present := m["login_region"]; present {
+					nextLoginRegion = normalizeRegion(configScalarString(v))
+				}
+				if v, present := m["checkin_auto"]; present {
+					nextCheckinAuto = configScalarBool(v)
+				}
+				if v, present := m["lifecycle_auto"]; present {
+					nextLifecycleAuto = configScalarBool(v)
+				}
+				if v, present := m["token_keepalive"]; present {
+					nextKeepaliveAuto = configScalarBool(v)
+				}
+				if v, present := m["scheduler_mode"]; present && configScalarString(v) == schedulerModeCredits {
+					nextSchedulerMode = schedulerModeCredits
+				}
+				if v, present := m["usage_report_url"]; present {
+					cfgURL = configScalarString(v)
+				}
+				if v, present := m["usage_report_key"]; present {
+					cfgKey = configScalarString(v)
+				}
+				if v, present := m["management_key"]; present {
+					nextMgmtKey = configScalarString(v)
+				}
+				if v, present := m["stream_head_timeout"]; present {
+					if secs, errParse := strconv.Atoi(configScalarString(v)); errParse == nil {
+						nextStreamHeadTimeout = secs
+					}
+				}
+			}
 			for _, line := range strings.Split(string(req.ConfigYAML), "\n") {
 				line = strings.TrimSpace(line)
 				if strings.HasPrefix(line, "checkin_auto:") {
@@ -154,9 +200,16 @@ func configure(raw []byte) {
 	keepaliveAuto = nextKeepaliveAuto
 	keepaliveAutoMu.Unlock()
 
-	loginRegionMu.Lock()
-	loginRegion = nextLoginRegion
-	loginRegionMu.Unlock()
+	// Sticky (issue #24): only an explicit login_region key moves the
+	// pointer; bare/foreign reconfigures keep whatever was configured.
+	if nextLoginRegion != "" {
+		loginRegionMu.Lock()
+		if loginRegion != nextLoginRegion {
+			log.Printf("qoder: login_region=%s applied (new logins target %s)", nextLoginRegion, strings.ToUpper(nextLoginRegion))
+		}
+		loginRegion = nextLoginRegion
+		loginRegionMu.Unlock()
+	}
 
 	setStreamHeadTimeout(nextStreamHeadTimeout)
 

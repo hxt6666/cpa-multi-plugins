@@ -94,7 +94,7 @@ const (
 	intlOauthDeviceType       = "windows"
 	intlOauthOSVersion        = "Windows 11 Pro"
 	intlOauthEnv              = "prod"
-	oauthAppVersion           = "3.5.66"
+	oauthAppVersionDefault    = "3.5.66"
 	intlOauthAppType          = "trae"
 	intlOauthDeviceName       = "DESKTOP-CPAINTL"
 )
@@ -537,7 +537,7 @@ func intlhandleStartLogin(request []byte) ([]byte, error) {
 		DeviceType:    intlOauthDeviceType,
 		OSVersion:     intlOauthOSVersion,
 		Env:           intlOauthEnv,
-		AppVersion:    oauthAppVersion,
+		AppVersion:    loadedAppVersion(),
 		AppType:       intlOauthAppType,
 		CodeChallenge: codeChallenge,
 		HideSaasLogin: false, // Intl non-SOLO does not hide SaaS login
@@ -696,14 +696,14 @@ func intlhandlePollLogin(request []byte) ([]byte, error) {
 	}
 	di := intlbuildOfficialDeviceInfo(
 		lc.deviceID, lc.machineID, oauthPlatformCode, intlOauthDeviceName,
-		intlOauthDeviceBrand, oauthAppVersion, intlOauthDeviceType, intlOauthOSVersion, pubKeyPEM,
+		intlOauthDeviceBrand, loadedAppVersion(), intlOauthDeviceType, intlOauthOSVersion, pubKeyPEM,
 	)
 	tokenBody := map[string]any{
 		"ClientID":     intlupstreamClient.ClientID,
 		"AuthCode":     lc.authCode,
 		"CodeVerifier": lc.codeVerifier,
 		"DeviceInfo":   di,
-		"IDEVersion":   oauthAppVersion,
+		"IDEVersion":   loadedAppVersion(),
 	}
 	tokenBytes, _ := json.Marshal(tokenBody)
 	tokenRaw, exErr := intlexchangeTokenCandidates(

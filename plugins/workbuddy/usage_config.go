@@ -6,6 +6,7 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -115,8 +116,8 @@ func configure(raw []byte) {
 	nextKeepaliveAuto := true
 	nextTasksAuto := true
 	nextMgmtKey := ""
-	nextLoginPlatform := "CLI"
-	nextLoginRegion := regionCN
+	nextLoginPlatform := ""    // sticky: empty = keep current (issue #24)
+	nextLoginRegion := ""      // sticky: empty = keep current (issue #24)
 	nextStreamHeadTimeout := 0 // default off: 0 seconds
 
 	nextPinned := map[string][]string{}
@@ -126,6 +127,54 @@ func configure(raw []byte) {
 			ConfigYAML []byte `json:"config_yaml"`
 		}
 		if err := json.Unmarshal(raw, &req); err == nil {
+			// v0.9.45 (issue #24): decode the payload as real YAML
+			// first -- yaml.v3 rides in via the SDK, and this sees
+			// flow-style one-liners ({k: v}) and JSON that the
+			// line-scan below can never match. Block style parses
+			// identically in both paths.
+			if m, ok := decodePluginConfigYAML(req.ConfigYAML); ok {
+				if v, present := m["login_region"]; present {
+					if strings.EqualFold(configScalarString(v), "intl") {
+						nextLoginRegion = regionIntl
+					} else {
+						nextLoginRegion = regionCN
+					}
+				}
+				if v, present := m["login_platform"]; present {
+					if p := configScalarString(v); strings.EqualFold(p, "CLI") || strings.EqualFold(p, "ide") {
+						nextLoginPlatform = p
+					}
+				}
+				if v, present := m["checkin_auto"]; present {
+					nextCheckinAuto = configScalarBool(v)
+				}
+				if v, present := m["lifecycle_auto"]; present {
+					nextLifecycleAuto = configScalarBool(v)
+				}
+				if v, present := m["tasks_auto"]; present {
+					nextTasksAuto = configScalarBool(v)
+				}
+				if v, present := m["token_keepalive"]; present {
+					nextKeepaliveAuto = configScalarBool(v)
+				}
+				if v, present := m["scheduler_mode"]; present && configScalarString(v) == schedulerModeCredits {
+					nextSchedulerMode = schedulerModeCredits
+				}
+				if v, present := m["usage_report_url"]; present {
+					cfgURL = configScalarString(v)
+				}
+				if v, present := m["usage_report_key"]; present {
+					cfgKey = configScalarString(v)
+				}
+				if v, present := m["management_key"]; present {
+					nextMgmtKey = configScalarString(v)
+				}
+				if v, present := m["stream_head_timeout"]; present {
+					if n, err := strconv.Atoi(configScalarString(v)); err == nil && n > 0 {
+						nextStreamHeadTimeout = n
+					}
+				}
+			}
 			for _, line := range strings.Split(string(req.ConfigYAML), "\n") {
 				line = strings.TrimSpace(line)
 				if strings.HasPrefix(line, "checkin_auto:") {
@@ -216,17 +265,27 @@ func configure(raw []byte) {
 	tasksAuto = nextTasksAuto
 	tasksAutoMu.Unlock()
 
-	loginPlatformMu.Lock()
-	loginPlatform = nextLoginPlatform
-	loginPlatformMu.Unlock()
+	// Sticky (issue #24): only an explicit key moves the pointer; bare or
+	// foreign reconfigures (auth-store churn) keep whatever was set.
+	// Applied values are logged once -- previously a churn reconfigure
+	// could silently reset the region back to cn with no trace.
+	if nextLoginPlatform != "" {
+		loginPlatformMu.Lock()
+		if loginPlatform != nextLoginPlatform {
+			log.Printf("workbuddy: login_platform=%s applied", nextLoginPlatform)
+		}
+		loginPlatform = nextLoginPlatform
+		loginPlatformMu.Unlock()
+	}
 
-	loginPlatformMu.Lock()
-	loginPlatform = nextLoginPlatform
-	loginPlatformMu.Unlock()
-
-	loginRegionMu.Lock()
-	loginRegion = nextLoginRegion
-	loginRegionMu.Unlock()
+	if nextLoginRegion != "" {
+		loginRegionMu.Lock()
+		if loginRegion != nextLoginRegion {
+			log.Printf("workbuddy: login_region=%s applied (new logins target %s)", nextLoginRegion, strings.ToUpper(nextLoginRegion))
+		}
+		loginRegion = nextLoginRegion
+		loginRegionMu.Unlock()
+	}
 
 	lifecycleAutoMu.Lock()
 	lifecycleAuto = nextLifecycleAuto

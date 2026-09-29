@@ -51,7 +51,20 @@ const modelCacheDocKey = "model_cache"
 // would otherwise silently drop them. The whitelist (not a blanket merge) is
 // deliberate: a rebuild must not smuggle arbitrary stale keys from a
 // same-named older file.
-var preservedPluginDocKeys = []string{modelCacheDocKey}
+// v0.12.68 (issue #25): beyond the plugin-stamped model_cache, the list now
+// carries host-owned operator fields CPA writes into auth files via the auth
+// manager (proxy_url / weight / priority / prefix / label / request_retry /
+// headers) — every plugin-side rewrite used to reset them to defaults.
+var preservedPluginDocKeys = []string{
+	modelCacheDocKey,
+	"proxy_url",
+	"weight",
+	"priority",
+	"prefix",
+	"label",
+	"request_retry",
+	"headers",
+}
 
 // persistedModelCache is the on-disk snapshot shape.
 type persistedModelCache struct {

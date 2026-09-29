@@ -7,6 +7,7 @@ package main
 
 import (
 	"encoding/json"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -90,6 +91,23 @@ func loadedLoginVariant() string {
 	loginVariantMu.RLock()
 	defer loginVariantMu.RUnlock()
 	return loginVariant
+}
+
+// oauthAppVersion is the client version the INTL login flow presents
+// (GetLoginGuidance / device registration / IDEVersion). Configurable via
+// app_version (issue #24: the www.trae.ai authorization page rejects stale
+// CN version strings on the intl realm; operators can pin the currently
+// accepted one without a rebuild). Defaults to the historical constant.
+var (
+	oauthAppVersionMu sync.RWMutex
+	oauthAppVersion   = oauthAppVersionDefault
+)
+
+// loadedAppVersion returns the configured INTL client version.
+func loadedAppVersion() string {
+	oauthAppVersionMu.RLock()
+	defer oauthAppVersionMu.RUnlock()
+	return oauthAppVersion
 }
 
 // OAuth callback listener knobs (v0.12.2): callback_bind controls the local
@@ -192,6 +210,25 @@ func configureVariant(raw []byte) {
 					v := strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "login_variant:")), "\"'")
 					next = normalizeVariant(v)
 				}
+			}
+			// v0.12.68 (issue #24): the line-scan above silently misses
+			// flow-style one-liners ({enabled: true, login_variant: intl}) —
+			// the YAML decode sees them. Block style agrees in both paths;
+			// the map only adds visibility. The sticky rule is unchanged.
+			if m, ok := decodePluginConfigYAML(req.ConfigYAML); ok {
+				if v, present := m["login_variant"]; present {
+					next = normalizeVariant(configScalarString(v))
+				}
+				if v, present := m["app_version"]; present {
+					if av := strings.TrimSpace(configScalarString(v)); av != "" {
+						oauthAppVersionMu.Lock()
+						oauthAppVersion = av
+						oauthAppVersionMu.Unlock()
+					}
+				}
+			}
+			if next != "" && loadedLoginVariant() != next {
+				log.Printf("trae: login_variant=%s applied (new logins target %s)", next, strings.ToUpper(next))
 			}
 			configureCallback(lines)
 			configureCallbackPort(lines)

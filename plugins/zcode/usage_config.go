@@ -53,7 +53,7 @@ func loadedLoginProvider() string {
 
 // configure decodes plugin config from the lifecycle request.
 func configure(raw []byte) {
-	nextLoginProvider := providerZai // reset to default on reconfigure
+	nextLoginProvider := "" // sticky: empty = keep current (issue #24)
 	nextLifecycleAuto := true
 	nextMgmtKey := ""
 	cfgURL, cfgKey := "", ""
@@ -66,6 +66,35 @@ func configure(raw []byte) {
 			ConfigYAML []byte `json:"config_yaml"`
 		}
 		if err := json.Unmarshal(raw, &req); err == nil {
+			// v0.1.9 (issue #24): decode the payload as real YAML first --
+			// yaml.v3 rides in via the SDK, and this sees flow-style
+			// one-liners ({k: v}) and JSON that the line-scan below can
+			// never match. Block style parses identically in both paths.
+			if m, ok := decodePluginConfigYAML(req.ConfigYAML); ok {
+				if v, present := m["login_provider"]; present {
+					nextLoginProvider = normalizeProvider(configScalarString(v))
+				}
+				if v, present := m["lifecycle_auto"]; present {
+					nextLifecycleAuto = configScalarBool(v)
+				}
+				if v, present := m["offpeak"]; present {
+					nextOffPeak = configScalarBool(v)
+				}
+				if v, present := m["usage_report_url"]; present {
+					cfgURL = configScalarString(v)
+				}
+				if v, present := m["usage_report_key"]; present {
+					cfgKey = configScalarString(v)
+				}
+				if v, present := m["management_key"]; present {
+					nextMgmtKey = configScalarString(v)
+				}
+				if v, present := m["offpeak_max_wait"]; present {
+					if secs, perr := strconv.ParseInt(configScalarString(v), 10, 64); perr == nil && secs > 0 {
+						nextOffPeakMaxWait = time.Duration(secs) * time.Second
+					}
+				}
+			}
 			for _, line := range strings.Split(string(req.ConfigYAML), "\n") {
 				line = strings.TrimSpace(line)
 				if strings.HasPrefix(line, "login_provider:") {
@@ -114,9 +143,13 @@ func configure(raw []byte) {
 		}
 	}
 
-	loginProviderMu.Lock()
-	loginProvider = nextLoginProvider
-	loginProviderMu.Unlock()
+	// Sticky (issue #24): only an explicit login_provider key moves the
+	// pointer; bare/foreign reconfigures keep whatever was configured.
+	if nextLoginProvider != "" {
+		loginProviderMu.Lock()
+		loginProvider = nextLoginProvider
+		loginProviderMu.Unlock()
+	}
 
 	lifecycleAutoMu.Lock()
 	lifecycleAuto = nextLifecycleAuto

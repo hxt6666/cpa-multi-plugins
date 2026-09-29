@@ -508,14 +508,14 @@ func selfCompleteIntl(lc *intlloginCtx, source string) {
 	}
 	di := intlbuildOfficialDeviceInfo(
 		lc.deviceID, lc.machineID, oauthPlatformCode, intlOauthDeviceName,
-		intlOauthDeviceBrand, oauthAppVersion, intlOauthDeviceType, intlOauthOSVersion, pubKeyPEM,
+		intlOauthDeviceBrand, loadedAppVersion(), intlOauthDeviceType, intlOauthOSVersion, pubKeyPEM,
 	)
 	tokenBody := map[string]any{
 		"ClientID":     intlupstreamClient.ClientID,
 		"AuthCode":     lc.authCode,
 		"CodeVerifier": lc.codeVerifier,
 		"DeviceInfo":   di,
-		"IDEVersion":   oauthAppVersion,
+		"IDEVersion":   loadedAppVersion(),
 	}
 	tokenBytes, _ := json.Marshal(tokenBody)
 	tokenRaw, exErr := intlexchangeTokenCandidates(

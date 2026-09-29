@@ -213,14 +213,30 @@ func samePersistedModels(a, b []pluginapi.ModelInfo) bool {
 	return bytes.Equal(aj, bj)
 }
 
-// preservePluginDocKeys re-injects whitelisted plugin-stamped keys that the
-// incoming document is missing but the current physical file carries (called
-// from the hostAuthSaveJSON funnel). The typed buildAuthFileJSON rebuilds —
+// preservePluginDocKeys re-injects whitelisted keys that the incoming
+// document is missing but the current physical file carries (called from the
+// hostAuthSaveJSON funnel). The typed buildAuthFileJSON rebuilds —
 // lifecycle notes, adopt, import — construct a fresh document from a struct
 // and otherwise silently drop the v0.9.38 model_cache snapshot: every
 // credits-note churn wiped it, and the next discovery outage then advertised
 // nothing until the next successful discovery. Keys the caller explicitly
 // set always win over the persisted copy.
+//
+// v0.9.45 (issue #25): the whitelist now also covers host-owned operator
+// fields that CPA's auth manager writes into the file (proxy_url / weight /
+// priority / prefix / label / request_retry / headers). The typed rebuilds
+// used to reset them to defaults on every note churn.
+var preservedPluginDocKeys = []string{
+	modelCacheDocKey,
+	"proxy_url",
+	"weight",
+	"priority",
+	"prefix",
+	"label",
+	"request_retry",
+	"headers",
+}
+
 func preservePluginDocKeys(name string, doc []byte) []byte {
 	if len(doc) == 0 || name == "" {
 		return doc
@@ -229,7 +245,13 @@ func preservePluginDocKeys(name string, doc []byte) []byte {
 	if err := json.Unmarshal(doc, &have); err != nil {
 		return doc
 	}
-	if _, ok := have[modelCacheDocKey]; ok {
+	needed := make([]string, 0, len(preservedPluginDocKeys))
+	for _, k := range preservedPluginDocKeys {
+		if _, ok := have[k]; !ok {
+			needed = append(needed, k)
+		}
+	}
+	if len(needed) == 0 {
 		return doc
 	}
 	physical := physicalDocByName(name)
@@ -240,11 +262,18 @@ func preservePluginDocKeys(name string, doc []byte) []byte {
 	if err := json.Unmarshal(physical, &prev); err != nil {
 		return doc
 	}
-	raw, ok := prev[modelCacheDocKey]
-	if !ok || len(raw) == 0 {
+	restored := false
+	for _, k := range needed {
+		raw, ok := prev[k]
+		if !ok || len(raw) == 0 {
+			continue
+		}
+		have[k] = raw
+		restored = true
+	}
+	if !restored {
 		return doc
 	}
-	have[modelCacheDocKey] = raw
 	merged, err := json.Marshal(have)
 	if err != nil {
 		return doc

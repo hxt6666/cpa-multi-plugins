@@ -140,7 +140,7 @@ const (
 // version is injected at build time via -ldflags "-X main.version=...".
 // Keep the default in sync with the release tag: the shipped build.sh does
 // NOT inject it (only "-s -w"), so the plugin reports this literal value.
-var version = "0.12.66"
+var version = "0.12.68"
 
 var (
 	hostAPI *C.cliproxy_host_api
@@ -491,6 +491,7 @@ func buildRegistration() registrationPayload {
 			ConfigFields: []pluginapi.ConfigField{
 				{Name: "checkin_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily auto check-in at 09:00 local time (default true)."},
 				{Name: "login_variant", Type: pluginapi.ConfigFieldTypeEnum, EnumValues: []string{"cn", "solo", "intl"}, Description: "Variant for NEW logins: cn (Trae Code CN, default), solo (Trae SOLO CN) or intl (Trae Intl, marscode.com). Existing accounts keep the variant recorded at login/adoption time."},
+				{Name: "app_version", Type: pluginapi.ConfigFieldTypeString, Description: "Client version the INTL login flow presents (default 3.5.66). The www.trae.ai authorization page rejects stale version strings — set the version the intl client currently reports when logins bounce with a version-mismatch page."},
 				{Name: "callback_bind", Type: pluginapi.ConfigFieldTypeString, Description: "Bind address for the OAuth callback listener (default 127.0.0.1). Set 0.0.0.0 when CPA runs in Docker or on a remote host so the port can be published."},
 				{Name: "callback_port", Type: pluginapi.ConfigFieldTypeString, Description: "Fixed port for the OAuth callback listener (default: random per login). Docker: set e.g. 41890 with callback_bind=0.0.0.0 and publish -p 127.0.0.1:41890:41890 so the redirect completes automatically. If the browser runs on another machine and cannot reach the host's 127.0.0.1, or paste the failed address-bar URL into the paste box on <panel>/v0/resource/plugins/trae/panel (it replays it to the plugin's oauth_submit endpoint)."},
 				{Name: "token_keepalive", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Enable daily access-token refresh at 03:00 to prevent session expiry (default true)."},

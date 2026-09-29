@@ -336,7 +336,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.1.8"
+var version = "0.1.9"
 
 // coding-plane LLM upstream bases (see the consts block for why these are
 // vars: the e2e fallback tests repoint them at httptest servers).

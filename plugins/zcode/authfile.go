@@ -114,6 +114,12 @@ func hostAuthPersist(name string, raw []byte) error {
 	if name == "" {
 		return fmt.Errorf("empty auth file name")
 	}
+	// v0.1.9 (issue #25): every save carries host-owned operator fields
+	// (proxy_url / weight / priority / prefix / label / request_retry /
+	// headers) from the current physical document. Without this funnel the
+	// typed rebuilds reset the operator's proxy / weight / priority / prefix
+	// to defaults on every note churn.
+	raw = preservePluginDocKeys(name, raw)
 	saveReq := pluginapi.HostAuthSaveRequest{
 		Name: name,
 		JSON: raw,

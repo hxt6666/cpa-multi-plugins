@@ -108,7 +108,14 @@ func hostAuthGetPhysical(authIndex string) (*hostAuthPhysical, error) {
 	}
 	var env envelope
 	if err := json.Unmarshal(raw, &env); err != nil || !env.OK {
-		return nil, fmt.Errorf("host.auth.get: bad envelope")
+		// Issue #22: a bare "bad envelope" made startup adopt failures
+		// undiagnosable — surface the host's error message (truncated,
+		// envelope payloads carry no credentials).
+		msg := "bad envelope"
+		if env.Error != nil && strings.TrimSpace(env.Error.Message) != "" {
+			msg = "bad envelope: " + truncateRedacted(env.Error.Message, 160)
+		}
+		return nil, fmt.Errorf("host.auth.get: %s", msg)
 	}
 	var resp rpcHostAuthGetResponse
 	if err := json.Unmarshal(env.Result, &resp); err != nil {
