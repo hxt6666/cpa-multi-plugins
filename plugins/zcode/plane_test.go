@@ -383,7 +383,7 @@ func TestCollectUpstreamStreamFallsBack(t *testing.T) {
 	if route.anthropic {
 		t.Fatal("cold cache must route coding first")
 	}
-	fb := func(status int, failBody string) (chatRoute, string, bool) {
+	fb := func(status int, failBody string, _ http.Header) (chatRoute, string, bool) {
 		return startPlaneFallbackBody(sa, route, status, failBody, []byte(body), "glm-5.3-flash", true)
 	}
 	_, statusCode, err := collectUpstreamStream(body, sa, route, false, nil, "glm-5.3-flash", fb)

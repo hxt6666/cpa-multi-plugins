@@ -60,6 +60,9 @@ func configure(raw []byte) {
 	cfgVersion, cfgTitle, cfgReferer, cfgLang, cfgTz := "", "", "", "", ""
 	nextOffPeak := false
 	nextOffPeakMaxWait := time.Duration(0)
+	nextClaimAuto := true
+	nextClaimPlanID := ""
+	nextClaimPoll, nextClaimCooldown := 0, 0
 
 	if len(raw) > 0 {
 		var req struct {
@@ -88,6 +91,22 @@ func configure(raw []byte) {
 				}
 				if v, present := m["management_key"]; present {
 					nextMgmtKey = configScalarString(v)
+				}
+				if v, present := m["claim_auto"]; present {
+					nextClaimAuto = configScalarBool(v)
+				}
+				if v, present := m["claim_plan_id"]; present {
+					nextClaimPlanID = configScalarString(v)
+				}
+				if v, present := m["claim_poll_seconds"]; present {
+					if secs, perr := strconv.ParseInt(configScalarString(v), 10, 64); perr == nil && secs > 0 {
+						nextClaimPoll = int(secs)
+					}
+				}
+				if v, present := m["claim_cooldown_seconds"]; present {
+					if secs, perr := strconv.ParseInt(configScalarString(v), 10, 64); perr == nil && secs > 0 {
+						nextClaimCooldown = int(secs)
+					}
 				}
 				if v, present := m["offpeak_max_wait"]; present {
 					if secs, perr := strconv.ParseInt(configScalarString(v), 10, 64); perr == nil && secs > 0 {
@@ -123,6 +142,25 @@ func configure(raw []byte) {
 				}
 				if strings.HasPrefix(line, "management_key:") {
 					nextMgmtKey = strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "management_key:")), "\"'")
+				}
+				if strings.HasPrefix(line, "claim_auto:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "claim_auto:"))
+					nextClaimAuto = v == "true" || v == "1" || v == "yes" || v == "on"
+				}
+				if strings.HasPrefix(line, "claim_plan_id:") {
+					nextClaimPlanID = strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "claim_plan_id:")), "\"'")
+				}
+				if strings.HasPrefix(line, "claim_poll_seconds:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "claim_poll_seconds:"))
+					if secs, perr := strconv.ParseInt(v, 10, 64); perr == nil && secs > 0 {
+						nextClaimPoll = int(secs)
+					}
+				}
+				if strings.HasPrefix(line, "claim_cooldown_seconds:") {
+					v := strings.TrimSpace(strings.TrimPrefix(line, "claim_cooldown_seconds:"))
+					if secs, perr := strconv.ParseInt(v, 10, 64); perr == nil && secs > 0 {
+						nextClaimCooldown = int(secs)
+					}
 				}
 				if strings.HasPrefix(line, "identity_version:") {
 					cfgVersion = strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, "identity_version:")), "\"'")
@@ -172,6 +210,18 @@ func configure(raw []byte) {
 	managementAPIKeyMu.Lock()
 	managementAPIKey = nextMgmtKey
 	managementAPIKeyMu.Unlock()
+
+	claimConfigMu.Lock()
+	claimAuto = nextClaimAuto
+	claimPlanID = strings.TrimSpace(nextClaimPlanID)
+	if nextClaimPoll > 0 {
+		claimPollSeconds = nextClaimPoll
+	}
+	if nextClaimCooldown > 0 {
+		claimCooldownSecs = nextClaimCooldown
+	}
+	claimConfigMu.Unlock()
+	startClaimSchedulerOnce()
 
 	resolveUsageReport(cfgURL, cfgKey)
 }

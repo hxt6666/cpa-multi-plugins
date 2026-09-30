@@ -121,7 +121,9 @@ type rawClaimResponse struct {
 
 // fetchClaimPlan submits one claim for one account with the user-minted
 // captcha verify param. The header set is the claim plane's minimal bundle,
-// NOT the TV identity set (see the file header).
+// NOT the TV identity set (see the file header). The panel path keeps the
+// explicit refusal on a missing mint — a doomed network round trip helps
+// nobody there; the scheduler's probe path uses postClaim directly.
 func fetchClaimPlan(sa *storedAuth, planID, captchaParam, region string) claimOutcome {
 	out := claimOutcome{PlanID: planID}
 	if sa == nil || strings.TrimSpace(sa.Auth.JWT) == "" {
@@ -134,16 +136,33 @@ func fetchClaimPlan(sa *storedAuth, planID, captchaParam, region string) claimOu
 		out.Message = "missing captcha verify param"
 		return out
 	}
+	return postClaim(sa, planID, captchaParam, region)
+}
+
+// postClaim is the raw claim POST (v0.2.0): with a captcha param it is the
+// measured wire shape; with an EMPTY param it sends WITHOUT the captcha
+// headers — the auto-claim scheduler's probe, whose 3007 answer is the
+// definitive "this campaign is captcha-gated" signal (and whose success is
+// a free claim no browser was needed for).
+func postClaim(sa *storedAuth, planID, captchaParam, region string) claimOutcome {
+	out := claimOutcome{PlanID: planID}
+	if sa == nil || strings.TrimSpace(sa.Auth.JWT) == "" {
+		out.Kind = "login_required"
+		out.Message = "account has no plan JWT — re-run login"
+		return out
+	}
 	platform, arch := platformArch()
 	headers := map[string]string{
-		"Authorization":                 "Bearer " + sa.Auth.JWT,
-		"Content-Type":                  "application/json",
-		"X-Aliyun-Captcha-Verify-Param": captchaParam,
-		"X-ZCode-App-Version":           zcodeIdentity().appVersion,
-		"X-Platform":                    platform + "-" + arch,
+		"Authorization":       "Bearer " + sa.Auth.JWT,
+		"Content-Type":        "application/json",
+		"X-ZCode-App-Version": zcodeIdentity().appVersion,
+		"X-Platform":          platform + "-" + arch,
 	}
-	if strings.TrimSpace(region) != "" {
-		headers["X-Aliyun-Captcha-Verify-Region"] = region
+	if strings.TrimSpace(captchaParam) != "" {
+		headers["X-Aliyun-Captcha-Verify-Param"] = captchaParam
+		if strings.TrimSpace(region) != "" {
+			headers["X-Aliyun-Captcha-Verify-Region"] = region
+		}
 	}
 	if mid := strings.TrimSpace(sa.Auth.DeviceMid); mid != "" {
 		headers["X-Device-Mid"] = mid // campaign-gated deviation (0828 + 0918)

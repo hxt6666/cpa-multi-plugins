@@ -336,7 +336,7 @@ type registrationCapability struct {
 }
 
 // version is injected at build time via -ldflags "-X main.version=...".
-var version = "0.1.9"
+var version = "0.2.0"
 
 // coding-plane LLM upstream bases (see the consts block for why these are
 // vars: the e2e fallback tests repoint them at httptest servers).
@@ -362,6 +362,10 @@ func wbRegistration() registration {
 				{Name: "offpeak_max_wait", Type: pluginapi.ConfigFieldTypeString, Description: "Max seconds to wait for a queued ticket to turn ready before giving up (default 0 = only an immediately-ready ticket passes; e.g. 900 waits up to 15min). Queue-ack retries obey the same budget."},
 				{Name: "usage_report_url", Type: pluginapi.ConfigFieldTypeString, Description: "Optional override of CPAMP usage import URL (default http://cpa-manager-plus:18317/v0/management/usage/import; also env USAGE_REPORT_URL)."},
 				{Name: "usage_report_key", Type: pluginapi.ConfigFieldTypeString, Description: "Optional CPAMP admin key override. Prefer auto-detect from env CPAMP_ADMIN_KEY / USAGE_REPORT_KEY or secret file /run/secrets/cpamp_admin_key."},
+				{Name: "claim_auto", Type: pluginapi.ConfigFieldTypeBoolean, Description: "Auto-claim activity/weekend plans (issue #23): poll billing/preview per account and claim the target plan in the background. Ported from TriDefender/zcode-api's claim scheduler; captcha-gated campaigns need pool tokens minted by the panel's captcha refill button (a badge appears otherwise). Default true."},
+				{Name: "claim_plan_id", Type: pluginapi.ConfigFieldTypeString, Description: "Claim this plan_id only; empty claims the highest-priority preview. Default empty."},
+				{Name: "claim_poll_seconds", Type: pluginapi.ConfigFieldTypeString, Description: "Preview poll interval in seconds (default 300)."},
+				{Name: "claim_cooldown_seconds", Type: pluginapi.ConfigFieldTypeString, Description: "Backoff after a failed claim attempt in seconds (default 600)."},
 			},
 		},
 		Capabilities: registrationCapability{
@@ -735,11 +739,33 @@ func handleExecExecute(raw []byte) ([]byte, error) {
 				return nil, upstreamStatusError(fbSC, routeChatError(fbRoute, sa, fbSC, fbHdrs, fbFailBody))
 			}
 		}
+		if !settled && route.anthropic {
+			// Captcha retry (captcha_pool.go): the zcode-plan gateway's
+			// risk-control layer can challenge otherwise-valid calls (3007
+			// family) — exactly the plane the weekend/activity buckets
+			// (issue #21) live on. One retry with a panel-minted pool token;
+			// the body is already in the anthropic dialect.
+			if crRoute, ok := captchaRetryRoute(statusCode, string(payload), respHeaders); ok {
+				if crPayload, crSC, crHdrs, crFailBody, crDone := tryStartPlaneSend(sa, crRoute, body); crDone {
+					payload, statusCode, respHeaders, route = crPayload, crSC, crHdrs, crRoute
+					settled = true
+				} else if crSC > 0 {
+					publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, crSC, crFailBody)
+					recordUpstreamFailure(req.AuthID, cooldownModel, crSC, crFailBody)
+					reconcileAfterExecutorError(req.AuthID, crSC, crFailBody)
+					return nil, upstreamStatusError(crSC, routeChatError(crRoute, sa, crSC, crHdrs, crFailBody))
+				}
+			}
+		}
 		if !settled {
 			publishUsage(req.Model, upstreamModel, authUID, started, usage.Detail{}, true, statusCode, string(payload))
 			recordUpstreamFailure(req.AuthID, cooldownModel, statusCode, string(payload))
 			reconcileAfterExecutorError(req.AuthID, statusCode, string(payload))
-			return nil, upstreamStatusError(statusCode, routeChatError(route, sa, statusCode, respHeaders, string(payload)))
+			cerr := routeChatError(route, sa, statusCode, respHeaders, string(payload))
+			if hint := noPackageNoJWTHint(sa, statusCode, string(payload)); hint != "" {
+				cerr = fmt.Errorf("%v — %s", cerr, hint)
+			}
+			return nil, upstreamStatusError(statusCode, cerr)
 		}
 	}
 	if route.anthropic {
@@ -827,7 +853,13 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	// No async stream id → fall back to synchronous chunk collection.
 	if req.StreamID == "" {
 		collector := &sseUsageCollector{}
-		startPlaneFallback := func(status int, failBody string) (chatRoute, string, bool) {
+		startPlaneFallback := func(status int, failBody string, hdrs http.Header) (chatRoute, string, bool) {
+			// Captcha retry first (captcha_pool.go): same route, same body,
+			// pool token attached — a challenged start-plane call needs no
+			// re-translation, unlike the entitlement fallback below.
+			if crRoute, ok := captchaRetryRoute(status, failBody, hdrs); ok {
+				return crRoute, body, true
+			}
 			return startPlaneFallbackBody(sa, route, status, failBody, bodyRaw, upstreamModel, true)
 		}
 		chunks, statusCode, errCollect := collectUpstreamStream(body, sa, route, sseFramed, collector, upstreamModel, startPlaneFallback)
@@ -851,7 +883,13 @@ func handleExecStream(raw []byte) ([]byte, error) {
 	// sharedHTTPClient's 120s timeout, holding a pool slot the whole time.
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		startPlaneFallback := func(status int, failBody string) (chatRoute, string, bool) {
+		startPlaneFallback := func(status int, failBody string, hdrs http.Header) (chatRoute, string, bool) {
+			// Captcha retry first (captcha_pool.go): same route, same body,
+			// pool token attached — a challenged start-plane call needs no
+			// re-translation, unlike the entitlement fallback below.
+			if crRoute, ok := captchaRetryRoute(status, failBody, hdrs); ok {
+				return crRoute, body, true
+			}
 			return startPlaneFallbackBody(sa, route, status, failBody, bodyRaw, upstreamModel, true)
 		}
 		pumpUpstreamStream(ctx, sa, route, body, cancel, req.StreamID, sseFramed, req.Model, upstreamModel, authUID, started, req.AuthID, cooldownModel, startPlaneFallback)

@@ -210,3 +210,19 @@ func tryStartPlaneSend(sa *storedAuth, route chatRoute, body string) ([]byte, in
 	}
 	return payload, sc, hdrs, "", true
 }
+
+// noPackageNoJWTHint returns the diagnostic suffix for a no-resource-package
+// failure on a credential that carries NO plan JWT — the one configuration in
+// which the JWT-plane fallback can never run (both the pre-route and the
+// reactive retry require it). Without the hint that account just 1113s with
+// no visible reason (issue #21 follow-up: claimed weekend bucket, old
+// credential, nothing works and nothing says why).
+func noPackageNoJWTHint(sa *storedAuth, status int, body string) string {
+	if sa == nil || strings.TrimSpace(sa.Auth.JWT) != "" {
+		return ""
+	}
+	if !isNoResourcePackageError(status, body) {
+		return ""
+	}
+	return "该账号凭证没有 plan JWT（旧版登录或导入的凭据），活动/周末套餐额度永远路由不到 JWT 平面——请重新登录一次补齐 JWT"
+}

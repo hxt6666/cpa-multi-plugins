@@ -302,6 +302,9 @@ func managementRegistration() managementRegistrationResponse {
 			{Method: http.MethodPost, Path: base + "/cooldowns/clear", Description: "Clear cooldown for one account (auth_id) or one pair (auth_id + model)."},
 			{Method: http.MethodGet, Path: base + "/preview", Description: "List claimable trial plans (billing/preview) across accounts. Read-only."},
 			{Method: http.MethodPost, Path: base + "/claim", Description: "Claim one trial plan for one account with the panel-minted Aliyun captcha verify param (billing/claim). The captcha challenge runs in the panel page itself."},
+			{Method: http.MethodGet, Path: base + "/captcha_pool", Description: "Captcha token pool state (v0.2.0): how many panel-minted Aliyun verify params are stocked for challenged start-plane calls and auto-claims."},
+			{Method: http.MethodPost, Path: base + "/captcha_pool", Description: "Add one panel-minted Aliyun captcha verify param to the pool (body: {captcha, region}). One-shot tokens; FIFO; capped."},
+			{Method: http.MethodGet, Path: base + "/claim_status", Description: "Auto-claim scheduler state (issue #23): per-account last outcome, hold windows, captcha-needed badges, pool size."},
 		},
 		Resources: []resourceRoute{
 			{Path: "/panel", Menu: "ZCode", Description: "ZCode dashboard (Z.AI + BigModel): plan, quota, cooldowns."},
@@ -381,6 +384,12 @@ func handleManagement(raw []byte) ([]byte, error) {
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handlePreviewList()))
 	case req.Method == http.MethodPost && path == base+"/claim":
 		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleClaim(req)))
+	case req.Method == http.MethodGet && path == base+"/captcha_pool":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleCaptchaPoolGet()))
+	case req.Method == http.MethodPost && path == base+"/captcha_pool":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleCaptchaPoolPut(req)))
+	case req.Method == http.MethodGet && path == base+"/claim_status":
+		return okEnvelope(mgmtJSONResponse(http.StatusOK, handleClaimStatus()))
 	}
 	return okEnvelope(mgmtJSONResponse(http.StatusNotFound, map[string]any{"error": "not found: " + path}))
 }
@@ -393,7 +402,8 @@ func mutatingManagementPath(path string) bool {
 		base + "/select",
 		base + "/plan",
 		base + "/cooldowns/clear",
-		base + "/claim":
+		base + "/claim",
+		base + "/captcha_pool":
 		return true
 	}
 	return false

@@ -97,7 +97,7 @@ func streamHeaders() http.Header {
 // existing unwrap/clean path; start-plan anthropic events go through the
 // translation state machine (anthropic_sse.go) first, so the host only ever
 // sees OpenAI chunk JSON.
-func pumpUpstreamStream(ctx context.Context, sa *storedAuth, route chatRoute, body string, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID, cooldownModel string, startPlaneFallback func(int, string) (chatRoute, string, bool)) {
+func pumpUpstreamStream(ctx context.Context, sa *storedAuth, route chatRoute, body string, cancel context.CancelFunc, streamID string, sseFramed bool, requestedModel, upstreamModel, authUID string, started time.Time, authID, cooldownModel string, startPlaneFallback func(int, string, http.Header) (chatRoute, string, bool)) {
 	buildReq := func() (*http.Request, error) {
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, route.endpoint, strings.NewReader(body))
 		if err != nil {
@@ -136,7 +136,7 @@ func pumpUpstreamStream(ctx context.Context, sa *storedAuth, route chatRoute, bo
 		errBody := string(errPayload)
 		swapped := false
 		if startPlaneFallback != nil {
-			if fbRoute, fbBody, ok := startPlaneFallback(statusCode, errBody); ok {
+			if fbRoute, fbBody, ok := startPlaneFallback(statusCode, errBody, respHeaders); ok {
 				if fbStream, fbSC, fbHdrs, fbFailBody, fbOK := tryStartPlaneStream(sa, fbRoute, fbBody); fbOK {
 					stream.Close()
 					stream, statusCode, respHeaders, route = fbStream, fbSC, fbHdrs, fbRoute
@@ -162,7 +162,11 @@ func pumpUpstreamStream(ctx context.Context, sa *storedAuth, route chatRoute, bo
 			if authUID != "" {
 				go reconcileByUID(authUID, statusCode, errBody)
 			}
-			streamEmitError(streamID, routeChatError(route, sa, statusCode, respHeaders, errBody).Error())
+			errMsg := routeChatError(route, sa, statusCode, respHeaders, errBody).Error()
+			if hint := noPackageNoJWTHint(sa, statusCode, errBody); hint != "" {
+				errMsg += " — " + hint
+			}
+			streamEmitError(streamID, errMsg)
 			stream.Close()
 			return
 		}
@@ -284,7 +288,7 @@ func pumpUpstreamStream(ctx context.Context, sa *storedAuth, route chatRoute, bo
 // drain the upstream SSE, return the cleaned chunks as a slice. The
 // collector, when non-nil, observes the chunks for usage extraction. The
 // anthropic dialect is translated to OpenAI chunks before collection.
-func collectUpstreamStream(body string, sa *storedAuth, route chatRoute, sseFramed bool, collector *sseUsageCollector, upstreamModel string, startPlaneFallback func(int, string) (chatRoute, string, bool)) ([]pluginapi.ExecutorStreamChunk, int, error) {
+func collectUpstreamStream(body string, sa *storedAuth, route chatRoute, sseFramed bool, collector *sseUsageCollector, upstreamModel string, startPlaneFallback func(int, string, http.Header) (chatRoute, string, bool)) ([]pluginapi.ExecutorStreamChunk, int, error) {
 	buildReq := func() (*http.Request, error) {
 		httpReq, err := http.NewRequest(http.MethodPost, route.endpoint, strings.NewReader(body))
 		if err != nil {
@@ -302,7 +306,7 @@ func collectUpstreamStream(body string, sa *storedAuth, route chatRoute, sseFram
 		payload, _ := io.ReadAll(newHostStreamReader(stream))
 		swapped := false
 		if startPlaneFallback != nil {
-			if fbRoute, fbBody, ok := startPlaneFallback(statusCode, string(payload)); ok {
+			if fbRoute, fbBody, ok := startPlaneFallback(statusCode, string(payload), respHeaders); ok {
 				if fbStream, fbSC, fbHdrs, fbFailBody, fbOK := tryStartPlaneStream(sa, fbRoute, fbBody); fbOK {
 					stream.Close()
 					stream, statusCode, respHeaders, route = fbStream, fbSC, fbHdrs, fbRoute

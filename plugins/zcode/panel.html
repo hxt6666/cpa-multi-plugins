@@ -86,6 +86,12 @@ button.sec{background:var(--btn-sec);color:var(--fg)}button:disabled{opacity:.5;
     <div id="modelGroupsBox"><div class="card">加载中…</div></div>
     <div style="margin-top:10px"><button onclick="modelGroupsSave(this)">保存排除</button> <span class="sub">宿主热加载后数秒内生效</span></div>
   </div>
+  <div class="card" id="claimOpsCard">
+    <h2>活动自动领取 <span class="badge">v0.2.0</span></h2>
+    <div class="sub">后台每 5 分钟检查可领取活动并自动领取（issue #23，移植上游 scheduler 语义）。活动挂验证码门时，用本页浏览器铸造的无感令牌（验证码池）自动过验；令牌耗尽会出现「需验证码」提示——点下面的按钮补几个即可恢复全自动。</div>
+    <div id="claimOpsStatus"><div class="sub">加载中…</div></div>
+    <div class="bar" style="margin-top:10px"><button onclick="mintPoolTokens(this)">验证码补给 ×3</button></div>
+  </div>
   <div id="claimBox" style="display:none"></div>
   <div class="grid" id="cards"></div>
 </div>
@@ -393,8 +399,68 @@ async function claimPlan(btn){
     });
   }catch(e){ toast('验证码初始化失败：'+e.message); finish(); }
 }
+// ---- captcha pool + auto-claim scheduler (v0.2.0, issue #21/#23) ----------
+async function loadClaimOps(){
+  try{
+    const st=await api('/claim_status');
+    if(!(st&&st.ok)) return;
+    const accts=(st.accounts||[]);
+    const badge=accts.filter(a=>a.badge);
+    let rows=accts.slice(0,4).map(a=>{
+      const hold=a.hold_until?('<div class="sub">hold→'+escHtml(String(a.hold_until)).slice(0,80)+'</div>'):'';
+      return '<div class="stat"><span class="k">'+escHtml(a.auth_index||'')+'</span><span class="v">'+escHtml(a.kind||'-')+(a.message?' · '+escHtml(a.message):'')+'</span></div>'+hold;
+    }).join('');
+    document.getElementById('claimOpsStatus').innerHTML =
+      '<div class="stat"><span class="k">自动领取</span><span class="v">'+(st.enabled?'开启':'关闭')+'</span></div>'
+      +'<div class="stat"><span class="k">验证码池</span><span class="v">'+(st.pool?st.pool.size:0)+' / '+(st.pool?st.pool.capacity:0)+'</span></div>'
+      +(st.badge_accounts?'<div class="stat"><span class="k">需验证码</span><span class="v" style="color:var(--err)">'+st.badge_accounts+' 个账号</span></div>':'')
+      +rows
+      +'<div class="sub">'+(badge.length?'领取被验证码拦住：点「验证码补给」铸几个无感令牌即可自动继续。':(st.enabled?('轮询中…每 '+(st.poll_seconds||300)+' 秒检查一次可领取活动。'):'已关闭（claim_auto=false）。'))+'</div>';
+  }catch(e){}
+}
+let minting=false;
+async function mintPoolTokens(btn){
+  if(minting) return; minting=true;
+  const orig=btn.textContent; btn.disabled=true;
+  let minted=0;
+  try{ await loadCapSdk(); }
+  catch(e){ toast(e.message); btn.disabled=false; btn.textContent=orig; minting=false; return; }
+  for(let i=0;i<3;i++){
+    const ok=await new Promise(function(res){
+      const seq=++capSeq, boxId='zcap-box-'+seq, btnId='zcap-btn-'+seq;
+      let holder=document.getElementById('zcap-holder');
+      if(!holder){ holder=document.createElement('div'); holder.id='zcap-holder'; document.body.appendChild(holder); }
+      holder.innerHTML='<div id="'+boxId+'"></div><button id="'+btnId+'" style="display:none"></button>';
+      let instRef=null;
+      const watchdog=setTimeout(function(){ try{if(instRef&&instRef.destroy)instRef.destroy();}catch(e){} res(false); },60000);
+      window.initAliyunCaptcha({
+        SceneId:CAP_SCENE, mode:'popup', region:CAP_REGION, prefix:CAP_PREFIX, language:'cn',
+        element:'#'+boxId, button:'#'+btnId, captchaLogoImg:'', showErrorTip:false,
+        getInstance:function(inst){
+          instRef=inst;
+          try{ (inst.startTracelessVerification||inst.show).call(inst); }
+          catch(e){ clearTimeout(watchdog); res(false); }
+        },
+        success:function(result){
+          clearTimeout(watchdog);
+          const param=(typeof result==='string')?result:((result&&result.captchaVerifyParam)||(result&&result.verifyParam)||'');
+          try{ if(instRef&&instRef.destroy) instRef.destroy(); }catch(e){}
+          if(!param){ res(false); return; }
+          api('/captcha_pool',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({captcha:param,region:CAP_REGION})}).then(function(r){ res(!!(r&&r.ok)); }).catch(function(){ res(false); });
+        }
+      });
+    });
+    if(!ok) break;
+    minted++;
+    await new Promise(function(r){ setTimeout(r,1200) });
+  }
+  btn.disabled=false; btn.textContent=orig; minting=false;
+  toast(minted?('已补给 '+minted+' 个验证码令牌'):'无感验证未通过——可稍后重试或改走滑块');
+  loadClaimOps();
+}
 if(!mgmtKey) showKeyBox(MSG_NEEDKEY);
 load(false,false);
+loadClaimOps();
 </script>
 </body>
 </html>

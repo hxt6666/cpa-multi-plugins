@@ -31,7 +31,8 @@
 
 - **off-peak 流式不重试**：429 排队 / 3102 票废的重试循环仅在非流式路径透明执行；流式一旦开始吐 chunk，重试无法对客户端隐藏（取票阶段的等待/重取两条路径全通道可用）。票已 ready 时 5min TTL 内发送，遇到 429/3102 的概率极低。
 - **off-peak bigmodel-team 形态未支持**：Team 账号需要 `bigmodel-organization` / `bigmodel-project` 双头（缺一不发），插件当前不存储组织/项目 ID，个人套餐（personal）不受影响。
-- **试用套餐领取：面板内直接领取（0.1.6 起）**：可领取活动经 billing/preview 只读展示（0.1.5 起——含 grant 预览，如 300,000,000 tokens 的 GLM-5.3-Flash 体验包）；点击「领取」后在面板页内弹出阿里云验证码（AliyunCaptcha.js 加载进用户浏览器，SceneId/prefix 复刻官方实例），低风险环境无感通过（等于一键领取），否则拖动滑块，通过后面板把一次性 verify param 交给插件转发 `billing/claim`（最小头集：Authorization + 验证码头 + 版本/平台 + `X-Device-Mid`）。2026-09-26 实测：验证码实例未绑定 zcode.z.ai 域名（127.0.0.1 源上 config/pe/FeiLin/verify 全链 200），用户浏览器即可铸造真实凭据，无需官方客户端、无需侧车。领取后额度包经 billing/balance 显示为独立余量池；biz 3007 = 验证码被拒，重试即可。
+- **活动自动领取（0.2.0 起，issue #23）**：后台调度器每 5 分钟（`claim_poll_seconds`）轮询各账号 billing/preview，自动领取目标活动（`claim_plan_id`，空 = 最高优先级）；退避语义移植上游 TriDefender/zcode-api scheduler：成功/已领取 hold 到活动结束、名额尽 hold 1h、其余冷却 10min、401 badge 提示重登。活动挂验证码门（3007）时消费「验证码池」令牌自动过验——池由面板「验证码补给 ×3」按钮铸造（浏览器无感验证，原理同手动领取）；池空时调度器先无验证码试探（未挂门的活动直接成功），被拦则面板亮「需验证码」badge，`GET /claim_status` 可查全量状态。
+- **周末/活动额度直达 JWT 平面（0.1.7-0.2.0，issue #21）**：Weekend Build 等活动桶授予的模型（如 glm-5.3-flash）住在 zcode-plan JWT 平面而非 coding 平面——余额桶 capabilities 预路由（0.1.7）+ coding 平面 1113 一次 JWT 平面回退（0.1.7）+ **回退撞 3007 风控验证码时自动用池内令牌重试一次（0.2.0）**；无 JWT 的旧凭证撞 1113 会附明确提示（重新登录补齐 JWT）。zcode-api 上游参考实现靠进程内求解器供令牌，本插件令牌全部来自用户真实浏览器铸造（无指纹伪造面）。
 
 ## 构建
 
@@ -50,6 +51,9 @@ make lint     # gofmt + vet
 | `scheduler_mode` | `off`（默认，宿主调度）/ `credits`（面板选中账号 + 耗尽回退 + 冷却过滤） |
 | `offpeak` | 启用错峰票务通道（默认 false；仅对 coding-plan 账号生效，start-plan 永不路由） |
 | `offpeak_max_wait` | 排队取票最长等待秒数（默认 0 = 仅接受即时 ready 的票；如 `900` = 最多等 15min；429 排队重试共用该预算） |
+| `claim_auto` | 活动自动领取（默认 true；issue #23）——关掉则只保留面板手动领取 |
+| `claim_plan_id` | 只领该 plan_id；空 = 领最高优先级活动 |
+| `claim_poll_seconds` / `claim_cooldown_seconds` | 活动轮询间隔（默认 300）/ 领取失败退避（默认 600） |
 | `usage_report_url` / `usage_report_key` | CPAMP 用量上报覆盖（env `USAGE_REPORT_*` / `CPAMP_ADMIN_KEY` 亦可） |
 | `identity_version` 等 | 身份头 appVersion/Title/Referer/Language/Timezone 覆盖（默认对齐 ZCode 3.14.0） |
 
