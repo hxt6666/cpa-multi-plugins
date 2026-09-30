@@ -54,7 +54,7 @@ type managementRegistrationResponse struct {
 func mimoManagementRegistration() managementRegistrationResponse {
 	return managementRegistrationResponse{
 		Resources: []resourceRoute{
-			{Path: "/oauth_submit", Menu: "Mimo", Description: "MiMo 登录（唯一面板页，v0.2.15 合并两条粘贴流）：① OAuth 授权后跳转 localhost 失败——复制地址栏完整链接粘贴完成登录（远程/Docker 桌面 OAuth 兜底）；② 桌面会员引导行 passToken/userId 粘贴登录（容器部署，无需桌面端同机）。登录进行中时页面自动变为引导页。"},
+			{Path: "/oauth_submit", Menu: "Mimo", Description: "MiMo 登录（唯一面板页，v0.2.15 合并两条粘贴流；v0.2.17 起页面内 fetch 提交、不再跳转）：① OAuth 授权后跳转 localhost 失败——复制地址栏完整链接粘贴完成登录（远程/Docker 桌面 OAuth 兜底）；② 桌面会员引导行 passToken/userId 粘贴登录（容器部署，无需桌面端同机）。登录进行中时页面自动变为引导页。"},
 			// Menu-less: routable browser resource without a second sidebar entry.
 			{Path: "/cookie_submit", Description: "Cookie-lane paste login — POST target of the combined Mimo page (v0.2.14)."},
 		},
@@ -338,11 +338,41 @@ func mimoCookieSection() string {
 	return `<hr style="margin:32px 0;border:none;border-top:1px solid #ddd"><h3>桌面会员 · 引导行粘贴登录（无需桌面端同机）</h3>` + mimoCookiePasteFormHTML
 }
 
+// mimoPasteInterceptScript is injected into EVERY mimo page (head of the
+// document). It intercepts submits of the two paste forms (cb_url / cookies)
+// and re-fires them as same-origin fetch() calls against paths derived from
+// location.pathname — the browser never navigates, so a paste can no longer
+// land on an unloadable host-relative URL (user report 2026-09-30); the
+// response page replaces the document inline. If fetch itself fails, the
+// handler releases the form to native submission once — the pre-0.2.17
+// behavior — so the page degrades instead of eating the input.
+const mimoPasteInterceptScript = `<script>
+(function(){
+function baseDir(){var p=location.pathname.replace(/\/+$/,'');return p.slice(0,p.lastIndexOf('/'));}
+function swap(html){document.open();document.write(html);document.close();}
+document.addEventListener('submit',function(ev){
+  var f=ev.target;if(!f||!f.querySelector)return;
+  var cb=f.querySelector('input[name="cb_url"]');
+  var ck=f.querySelector('textarea[name="cookies"]');
+  if(!cb&&!ck)return;
+  ev.preventDefault();
+  var q,sub;
+  if(cb){q='cb_url='+encodeURIComponent(cb.value);sub='/oauth_submit';}
+  else{var r=f.querySelector('select[name="region"]');q='cookies='+encodeURIComponent(ck.value)+(r&&r.value?'&region='+encodeURIComponent(r.value):'');sub='/cookie_submit';}
+  fetch(baseDir()+sub+'?'+q,{credentials:'same-origin'}).then(function(r){
+    if(!r.ok)throw new Error('HTTP '+r.status);return r.text();
+  }).then(swap).catch(function(){
+    f.__mimoRaw=true;f.submit();
+  });
+},true);
+})();
+</script>`
+
 // mimoSubmitPage renders the minimal browser-facing fallback page. body may
 // carry trusted HTML (the form); dynamic interpolations are escaped by the
-// callers.
+// callers. Every page carries the paste interceptor (v0.2.17).
 func mimoSubmitPage(title, body string) []byte {
-	return mimoSubmitPageHead(title, "", body)
+	return mimoSubmitPageHead(title, mimoPasteInterceptScript, body)
 }
 
 // mimoSubmitPageHead additionally injects raw head HTML (headExtra is a

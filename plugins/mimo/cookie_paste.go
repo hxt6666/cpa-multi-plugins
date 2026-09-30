@@ -27,18 +27,29 @@ import (
 // ticket and persists the credential. GET since v0.2.15 renders the SAME
 // combined page as the menu entry (/oauth_submit) — one "Mimo" surface, both
 // paste lanes; the OAuth section's state-awareness comes along for free.
+// v0.2.17: GET with a non-empty `cookies` query processes the paste exactly
+// like POST — the panel page's fetch-based submitter fires this shape so a
+// paste never navigates the browser (user report 2026-09-30: submitting the
+// form navigated to a host-relative URL that could not load, leaving no
+// credential behind; the fetch path keeps the page and renders the result
+// inline, immune to mount-prefix and trailing-slash resolution).
 func handleMimoCookieSubmit(req pluginapi.ManagementRequest) []byte {
 	if strings.EqualFold(req.Method, http.MethodPost) {
-		return handleMimoCookieSubmitPost(req)
+		vals, err := url.ParseQuery(string(req.Body))
+		if err != nil {
+			return mimoSubmitPage("提交无法解析", "表单数据不是合法的 urlencoded 载荷："+html.EscapeString(err.Error()))
+		}
+		return handleMimoCookieSubmitValues(vals)
+	}
+	if q := strings.TrimSpace(req.Query.Get("cookies")); q != "" {
+		return handleMimoCookieSubmitValues(req.Query)
 	}
 	return handleMimoOAuthSubmit(req)
 }
 
-func handleMimoCookieSubmitPost(req pluginapi.ManagementRequest) []byte {
-	vals, err := url.ParseQuery(string(req.Body))
-	if err != nil {
-		return mimoSubmitPage("提交无法解析", "表单数据不是合法的 urlencoded 载荷："+html.EscapeString(err.Error()))
-	}
+// handleMimoCookieSubmitValues runs the paste lane for one submitted form
+// (POST body or GET query — same fields: cookies, region).
+func handleMimoCookieSubmitValues(vals url.Values) []byte {
 	blob := vals.Get("cookies")
 	pinned := normalizePasteRegion(vals.Get("region"))
 

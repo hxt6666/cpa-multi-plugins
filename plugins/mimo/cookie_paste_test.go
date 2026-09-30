@@ -205,3 +205,45 @@ func TestNormalizePasteRegion(t *testing.T) {
 		}
 	}
 }
+
+// TestCookieSubmitGETQueryProcessesPaste pins the v0.2.17 fetch-based lane:
+// GET ?cookies=…&region=… processes the paste exactly like the POST form
+// (no navigation required), and plain GET keeps rendering the combined page.
+func TestCookieSubmitGETQueryProcessesPaste(t *testing.T) {
+	srv := withPassportStub(t)
+	swapServiceLoginBase(t, srv.URL)
+
+	var savedName string
+	hostAuthPersistFn = func(name string, raw []byte) error { savedName = name; return nil }
+	defer func() { hostAuthPersistFn = hostAuthPersist }()
+
+	page := string(handleMimoCookieSubmit(pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/resource/plugins/mimo/cookie_submit",
+		Query:  url.Values{"cookies": {"passToken=pt; userId=3839; cUserId=cu"}, "region": {"sgp"}},
+	}))
+	if !strings.Contains(page, "粘贴登录完成") || savedName == "" {
+		t.Fatalf("GET query paste not processed: page=%q saved=%q", page, savedName)
+	}
+
+	plain := string(handleMimoCookieSubmit(pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/resource/plugins/mimo/cookie_submit",
+	}))
+	if !strings.Contains(plain, "桌面会员") || !strings.Contains(plain, "cb_url") {
+		t.Fatalf("plain GET no longer renders the combined page")
+	}
+}
+
+// TestMimoPagesCarryPasteInterceptor pins the no-navigation guarantee: every
+// rendered mimo page ships the fetch-based submit interceptor, and the
+// interceptor derives its target paths from location.pathname (mount-prefix
+// and trailing-slash immune) rather than any hardcoded /v0/resource shape.
+func TestMimoPagesCarryPasteInterceptor(t *testing.T) {
+	page := string(mimoSubmitPage("t", "<b>body</b>"))
+	for _, marker := range []string{"addEventListener('submit'", "fetch(", "location.pathname", "cb_url", "cookies"} {
+		if !strings.Contains(page, marker) {
+			t.Fatalf("interceptor missing marker %q", marker)
+		}
+	}
+}
