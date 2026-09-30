@@ -6,6 +6,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -217,10 +218,36 @@ func upstreamReadError(err error) error {
 	return fmt.Errorf("upstream stream read error (unexpected EOF): %w", err)
 }
 
+// collapseGatewayTimeoutPage detects an upstream load-balancer failure page
+// and collapses it to one actionable line. Observed 2026-09-29 (qfmodel):
+// first token for ~1.1M-token prompts took 52-60s and the Alibaba Cloud ALB
+// in front of the qoder gateway cut the connection at ~60s — the client got
+// the signature HTML page (<title>504 Gateway Time-out</title> …
+// <center>alb</center>) rendered as useless markup soup behind a plain 500.
+// The failure is transport-level, not account trouble: a straight retry is
+// the right move, and recurring hits on huge prompts mean compaction. Any
+// other HTML body with a 5xx status gets a generic gateway-fault line.
+func collapseGatewayTimeoutPage(status int, body string) (string, bool) {
+	if status < 500 {
+		return "", false
+	}
+	lower := strings.ToLower(body)
+	if !strings.Contains(lower, "<html") {
+		return "", false
+	}
+	if strings.Contains(lower, "gateway time-out") || strings.Contains(lower, "<center>alb</center>") {
+		return fmt.Sprintf("upstream %d: 上游网关超时（ALB 等不到首 token，约 60s 切断；大上下文请求易触发，与账号无关）— 直接重试即可；反复出现请压缩上下文", status), true
+	}
+	return fmt.Sprintf("upstream %d: 上游网关返回 HTML 错误页（网关层故障，与账号无关）— 稍后重试", status), true
+}
+
 // chatUpstreamError renders an upstream chat failure for the client, adding
 // actionable copy when the rejection was caused by oversized input so users
 // don't mistake it for an account/quota problem.
 func chatUpstreamError(status int, body string) error {
+	if line, ok := collapseGatewayTimeoutPage(status, body); ok {
+		return errors.New(line)
+	}
 	trimmed := truncateRedacted(body, 200)
 	if chatInputTooLarge(status, body) {
 		return fmt.Errorf("输入过大被上游拒绝（请求级问题，与账号无关）：请压缩上下文/清理会话后重试 — upstream %d: %s", status, trimmed)

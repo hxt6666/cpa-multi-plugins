@@ -939,6 +939,13 @@ func describeQoderEnvelopeRejection(body string, rawError json.RawMessage, statu
 		Details json.RawMessage `json:"details"`
 	}
 	_ = json.Unmarshal([]byte(payload), &probe)
+	// v0.8.31: the plan-gate family (code 112) carries nothing but a pricing
+	// URL — render one actionable line instead of raw JSON soup, and stamp the
+	// plan_gate marker the cooldown classifier keys on (recordUpstreamFailure
+	// cools only the (credential, model) pair; the account stays live).
+	if fmt.Sprintf("%v", probe.Code) == qoderPlanGateCode {
+		return truncateRedacted(planGateLine(probe.Message), 700)
+	}
 	if len(probe.Details) > 0 {
 		// A JSON-string details value unwraps to the object it quotes.
 		var quoted string
@@ -960,6 +967,59 @@ func describeQoderEnvelopeRejection(body string, rawError json.RawMessage, statu
 		}
 	}
 	return truncateRedacted(fmt.Sprintf("status=%d code=%v type=%s: %s", status, probe.Code, probe.Type, probe.Message), 700)
+}
+
+// qoderPlanGateCode is the gateway's plan/entitlement business code. Observed
+// 2026-09-26 on qmodel_38max while qfmodel kept working on the same account:
+//
+//	{"code":"112","message":"{\"pricingUrl\":\"https://qoder.com.cn/pricing?client=qoder\"}"}
+//
+// The rejection is plan-scoped (quota/range), NOT account-wide — it must not
+// read as a credit outage, and recordUpstreamFailure cools only the
+// (credential, model) pair via the plan_gate marker.
+const qoderPlanGateCode = "112"
+
+// planGateLine renders the plan-gate family as one greppable, actionable
+// line. The message field is observed as a JSON string quoting an object
+// that carries pricingUrl; pricingURLFromMessage walks the shapes.
+func planGateLine(message string) string {
+	line := "plan_gate: code=112 套餐额度或模型范围限制（同账号其他模型通常不受影响）— 升级套餐或换模型后重试"
+	if u := pricingURLFromMessage(message); u != "" {
+		line += ": " + u
+	}
+	return line
+}
+
+// pricingURLFromMessage extracts pricingUrl from the shapes the plan-gate
+// message field arrives in: a JSON object, a JSON string quoting that object,
+// or (last resort) a substring sniff after the pricingUrl key.
+func pricingURLFromMessage(message string) string {
+	var obj struct {
+		PricingURL string `json:"pricingUrl"`
+	}
+	if json.Unmarshal([]byte(message), &obj) == nil && obj.PricingURL != "" {
+		return obj.PricingURL
+	}
+	var quoted string
+	if json.Unmarshal([]byte(message), &quoted) == nil {
+		if json.Unmarshal([]byte(quoted), &obj) == nil && obj.PricingURL != "" {
+			return obj.PricingURL
+		}
+	}
+	if i := strings.Index(message, "pricingUrl"); i >= 0 {
+		if j := strings.Index(message[i:], "https://"); j >= 0 {
+			rest := message[i+j:]
+			end := len(rest)
+			for k := 0; k < len(rest); k++ {
+				if c := rest[k]; c == '"' || c == '\\' || c == ' ' || c == '}' || c == ']' {
+					end = k
+					break
+				}
+			}
+			return rest[:end]
+		}
+	}
+	return ""
 }
 
 func firstNonEmpty(vals ...string) string {

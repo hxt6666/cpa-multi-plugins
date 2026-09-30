@@ -310,6 +310,13 @@ func recordUpstreamFailure(authID, model string, status int, body string) {
 	if isHardCreditError(status, body) {
 		return
 	}
+	// v0.8.31: plan-gate (code 112) rejections are plan-scoped — cool the pair
+	// at the rate-limit cadence so the scheduler stops re-offering a model the
+	// plan currently cannot serve, while the rest of the catalog stays live.
+	if isPlanGateFailure(body) {
+		markModelCooldown(authID, model, cooldownReasonRateLimit)
+		return
+	}
 	if status == 429 || isSoftRateLimit(status, body) {
 		markModelCooldown(authID, model, cooldownReasonRateLimit)
 		return
@@ -326,6 +333,14 @@ func isEmptyStreamFailure(body string) bool {
 	body = strings.ToLower(strings.TrimSpace(body))
 	return strings.Contains(body, "empty_stream") ||
 		strings.Contains(body, "stream closed before first payload")
+}
+
+// isPlanGateFailure reports the qoder plan-gate family (code 112). The
+// "plan_gate" marker is stamped by describeQoderEnvelopeRejection so the
+// cooldown classifier keys on the message text the same way it does for
+// empty_stream.
+func isPlanGateFailure(body string) bool {
+	return strings.Contains(body, "plan_gate")
 }
 
 // handleCooldownList reports every active pair, or one account's pairs when
