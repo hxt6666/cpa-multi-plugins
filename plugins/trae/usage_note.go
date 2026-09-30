@@ -29,9 +29,14 @@
 // (v0.12.64 wires MethodUsageHandle — the capability was declared but the
 // dispatch case never existed, so trae records went to unknown_method).
 // The ledger keeps all-time totals, 35 daily buckets and 72 hourly buckets
-// per credential, persisted to `<authDir>/.trae-usage.json` (dot-prefixed so
-// adopt/heal never claim it; flushes are throttled and change-guarded). Note
-// writes are per-credential throttled (60s) and change-guarded — every
+// per credential, persisted to `<authDirParent>/.trae-usage.json` — the
+// PARENT of the auth dir (v0.12.69: the host's 本地凭据管理 lists every
+// auth-dir file no plugin claims as a credential, so even this dot-prefixed
+// sidecar showed up there as 平台 unknown 未识别凭证 noise — user report
+// 2026-09-30; the parent dir is not scanned by the host). The dot prefix
+// stays as belt-and-braces; a pre-relocation ledger inside the auth dir
+// migrates once on first load. Flushes are throttled and change-guarded.
+// Note writes are per-credential throttled (60s) and change-guarded — every
 // host.auth.save re-fires the watcher, so the loop must converge.
 //
 // Ownership: trae has no other note writer, so this writer owns the whole
@@ -148,14 +153,52 @@ func usageDataDir() string {
 	return usageDataDirOnce.dir
 }
 
-// usageLedgerPath resolves the ledger file. Empty when the auth dir is not
-// known yet (in-memory only until the first host listing provides a path).
+// usageLedgerPath resolves the ledger file — in the PARENT of the auth dir
+// (the host's unrecognized-credential list scans the auth dir itself; the
+// parent is not scanned). Empty when the auth dir is not known yet
+// (in-memory only until the first host listing provides a path).
 func usageLedgerPath() string {
+	dir := usageLedgerDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "."+providerName+"-usage.json")
+}
+
+// usageLedgerDir is the ledger's home directory: the parent of the auth
+// dir. Empty while the auth dir is unknown.
+func usageLedgerDir() string {
+	dir := usageDataDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Dir(dir)
+}
+
+// usageLedgerLegacyPath is the pre-relocation location inside the auth dir.
+func usageLedgerLegacyPath() string {
 	dir := usageDataDir()
 	if dir == "" {
 		return ""
 	}
 	return filepath.Join(dir, "."+providerName+"-usage.json")
+}
+
+// usageLedgerMigrateLegacy moves a pre-relocation ledger to its new home.
+// One-time, best effort: same-filesystem rename; on any failure the old
+// file stays put and the new-world ledger simply starts empty.
+func usageLedgerMigrateLegacy(newPath string) {
+	legacy := usageLedgerLegacyPath()
+	if legacy == "" || legacy == newPath {
+		return
+	}
+	if _, err := os.Stat(newPath); err == nil {
+		return // new-world file already exists — keep both as they are
+	}
+	if _, err := os.Stat(legacy); err != nil {
+		return
+	}
+	_ = os.Rename(legacy, newPath)
 }
 
 // usageLedgerLocked returns the ledger, loading it on first use. Caller must
@@ -168,6 +211,7 @@ func usageLedgerLocked() *usageLedger {
 	usageLedgerState.loaded = true
 	led := &usageLedger{Version: usageLedgerVersion, StartedAt: time.Now().UTC().Format(time.RFC3339), Accounts: map[string]*usageAccount{}}
 	if p := usageLedgerPath(); p != "" {
+		usageLedgerMigrateLegacy(p)
 		if raw, err := os.ReadFile(p); err == nil {
 			var stored usageLedger
 			if json.Unmarshal(raw, &stored) == nil && stored.Accounts != nil {
